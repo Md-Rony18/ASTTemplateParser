@@ -1,0 +1,30 @@
+<!-- Navbar Component -->
+<!-- Usage: <Include component="navigation/navbar">
+       <Param name="brand" value="MySite" />
+       <Param name="brandLink" value="/" />
+       <Param name="menuItems" value="MenuItems" />
+     </Include>
+-->
+
+<nav class="navbar">
+    <div class="navbar-brand">
+        <a href="{{brandLink}}">{{brand}}</a>
+    </div>
+    <ul class="navbar-menu">
+        <ForEach var="item" in="menuItems">
+            <li class="navbar-item">
+                <a href="{{item.Url}}" class="navbar-link">{{item.Label}}</a>
+                <If condition="item.Children">
+                    <ul class="dropdown">
+                        <ForEach var="child" in="item.Children">
+                            <li><a href="{{child.Url}}">{{child.Label}}</a></li>
+                        </ForEach>
+                    </ul>
+                </If>
+            </li>
+        </ForEach>
+    </ul>
+    <Slot name="actions">
+        <!-- Right-side actions slot -->
+    </Slot>
+</nav>

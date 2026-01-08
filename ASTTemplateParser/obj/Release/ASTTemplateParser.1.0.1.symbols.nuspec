@@ -1,0 +1,46 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2012/06/nuspec.xsd">
+  <metadata>
+    <id>ASTTemplateParser</id>
+    <version>1.0.1</version>
+    <authors>AST Template Parser Team</authors>
+    <license type="expression">MIT</license>
+    <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
+    <icon>icon.png</icon>
+    <readme>README.md</readme>
+    <projectUrl>https://github.com/yourusername/ASTTemplateParser</projectUrl>
+    <description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, and .NET 8.0+.</description>
+    <releaseNotes>v1.0.1 - Documentation Update (January 2026)
+- Completely rewritten README with step-by-step examples
+- Comprehensive DOCUMENTATION.md with clear explanations
+- Added Quick Reference Card
+- Improved troubleshooting section
+- Added common patterns examples
+- Better organized API Reference
+
+v1.0.0 - Initial Release
+- Cross-platform support (.NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, .NET 8.0+)
+- Component System with Include/Param tags
+- Layout System with RenderSection/RenderBody
+- Slot System for component content injection
+- Enterprise-grade Security (XSS, SQL injection, code injection protection)
+- High Performance (7,000+ ops/sec for small templates)
+- HTML Comment handling (prevents recursion in component docs)</releaseNotes>
+    <tags>template parser html razor-alternative components layouts security high-performance cross-platform netstandard</tags>
+    <repository type="git" url="https://github.com/yourusername/ASTTemplateParser" />
+    <dependencies>
+      <group targetFramework=".NETFramework4.8">
+        <dependency id="NCalcSync" version="5.11.0" exclude="Build,Analyzers" />
+      </group>
+      <group targetFramework="net6.0">
+        <dependency id="NCalcSync" version="5.11.0" exclude="Build,Analyzers" />
+      </group>
+      <group targetFramework="net8.0">
+        <dependency id="NCalcSync" version="5.11.0" exclude="Build,Analyzers" />
+      </group>
+      <group targetFramework=".NETStandard2.0">
+        <dependency id="NCalcSync" version="5.11.0" exclude="Build,Analyzers" />
+      </group>
+    </dependencies>
+  </metadata>
+</package>

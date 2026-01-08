@@ -1,0 +1,24 @@
+<!-- Recursive Navbar Component -->
+<!-- Supports unlimited depth nested menus -->
+<!-- Usage: 
+    <Include component="navigation/navbar-recursive">
+        <Param name="brand" value="MySite" />
+        <Param name="brandLink" value="/" />
+        <Param name="menuItems" value="MenuItems" />
+    </Include>
+-->
+
+<nav class="navbar">
+    <div class="navbar-brand">
+        <a href="{{brandLink}}">{{brand}}</a>
+    </div>
+    <ul class="navbar-menu">
+        <!-- Use recursive menu-item component for unlimited depth -->
+        <Include component="navigation/menu-item">
+            <Param name="items" value="menuItems" />
+        </Include>
+    </ul>
+    <Slot name="actions">
+        <!-- Right-side actions slot -->
+    </Slot>
+</nav>

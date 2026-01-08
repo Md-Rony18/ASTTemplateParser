@@ -1,0 +1,92 @@
+<!-- Home Page Template -->
+<!-- Demonstrates component usage and layout sections -->
+
+<Layout name="default">
+    <!-- Define custom head content -->
+    <Section name="head">
+        <link rel="stylesheet" href="/css/home.css">
+        <meta name="description" content="Welcome to our homepage">
+    </Section>
+
+    <!-- Custom navigation using component -->
+    <Section name="navigation">
+        <Include component="navigation/navbar">
+            <Param name="brand" value="{{SiteName}}" />
+            <Param name="brandLink" value="/" />
+        </Include>
+    </Section>
+
+    <!-- Main Body Content -->
+    <!-- Hero Section -->
+    <section class="hero">
+        <Include component="element/header">
+            <Param name="title" value="Welcome to {{SiteName}}" />
+            <Param name="subtitle" value="Building amazing templates with components" />
+        </Include>
+
+        <div class="hero-actions">
+            <Include component="element/button">
+                <Param name="text" value="Get Started" />
+                <Param name="type" value="primary" />
+                <Param name="href" value="/getting-started" />
+            </Include>
+
+            <Include component="element/button">
+                <Param name="text" value="Learn More" />
+                <Param name="type" value="secondary" />
+                <Param name="href" value="/about" />
+            </Include>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features">
+        <Include component="element/Title">
+            <Param name="text" value="Our Features" />
+            <Param name="level" value="2" />
+        </Include>
+
+        <div class="feature-grid">
+            <ForEach var="feature" in="Features">
+                <Include component="block/card">
+                    <Param name="title" value="{{feature.Title}}" />
+                    <Param name="image" value="{{feature.Image}}" />
+                    <p>{{feature.Description}}</p>
+
+                    <Slot name="footer">
+                        <Include component="element/button">
+                            <Param name="text" value="Learn More" />
+                            <Param name="type" value="link" />
+                            <Param name="href" value="{{feature.Link}}" />
+                        </Include>
+                    </Slot>
+                </Include>
+            </ForEach>
+        </div>
+    </section>
+
+    <!-- Testimonials -->
+    <If condition="ShowTestimonials">
+        <section class="testimonials">
+            <Include component="element/Title">
+                <Param name="text" value="What Our Clients Say" />
+                <Param name="level" value="2" />
+            </Include>
+
+            <ForEach var="testimonial" in="Testimonials">
+                <blockquote class="testimonial">
+                    <p>"{{testimonial.Quote}}"</p>
+                    <cite>— {{testimonial.Author}}, {{testimonial.Company}}</cite>
+                </blockquote>
+            </ForEach>
+        </section>
+    </If>
+
+    <!-- Custom scripts -->
+    <Section name="scripts">
+        <script src="/js/home.js"></script>
+        <script>
+            console.log('Home page loaded');
+        </script>
+    </Section>
+</Layout>

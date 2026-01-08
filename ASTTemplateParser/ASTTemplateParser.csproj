@@ -1,0 +1,81 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Multi-target: .NET Standard 2.0 (universal), .NET Framework 4.8, .NET 6+ -->
+    <TargetFrameworks>netstandard2.0;net48;net6.0;net8.0</TargetFrameworks>
+    <OutputType>Library</OutputType>
+    <RootNamespace>ASTTemplateParser</RootNamespace>
+    <AssemblyName>ASTTemplateParser</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    
+    <!-- Suppress transitive dependency warnings for .NET 6.0 -->
+    <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
+    
+    <!-- Optimization settings -->
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    
+    <!-- NuGet Package Settings -->
+    <PackageId>ASTTemplateParser</PackageId>
+    <Version>1.0.4</Version>
+    <Authors>AST Template Parser Team</Authors>
+    <Company>Your Company</Company>
+    <Product>AST Template Parser</Product>
+    <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, and .NET 8.0+.</Description>
+    <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/yourusername/ASTTemplateParser</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/yourusername/ASTTemplateParser</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    
+    <!-- Package generation -->
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    
+    <!-- Release notes -->
+    <PackageReleaseNotes>
+v1.0.4 - Pre-Render Data Extraction (January 2026)
+- NEW: ExtractIncludeNames() - Get Include names/cache keys before rendering
+- NEW: PrepareTemplate() + RenderPrepared() - Most efficient rendering workflow
+- NEW: IncludeNode.Name property for component instance identification
+- ZERO performance penalty - AST is cached and reused automatically
+
+v1.0.3 - Auto Cache Invalidation
+- Component files automatically reload when modified
+- Cache validates file modification time before use
+- No need to manually clear cache during development
+
+v1.0.2 - Dynamic Param Values
+- Support for {{variable}} syntax in Param values
+- Mixed content interpolation in Param
+- Nested object properties in Param values
+
+v1.0.1 - Documentation Update
+- Comprehensive README and DOCUMENTATION
+
+v1.0.0 - Initial Release
+- Component, Layout, Slot System
+- Enterprise-grade Security
+- High Performance (7,000+ ops/sec)
+    </PackageReleaseNotes>
+  </PropertyGroup>
+
+  <!-- Include README and icon in package -->
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" Condition="Exists('..\README.md')" />
+    <None Include="..\icon.png" Pack="true" PackagePath="\" Condition="Exists('..\icon.png')" />
+  </ItemGroup>
+
+  <!-- NuGet Package References -->
+  <ItemGroup>
+    <!-- NCalcSync with Lambda support - works on all platforms -->
+    <PackageReference Include="NCalcSync" Version="5.11.0" />
+  </ItemGroup>
+
+</Project>

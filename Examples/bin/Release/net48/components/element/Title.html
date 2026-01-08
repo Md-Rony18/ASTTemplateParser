@@ -1,0 +1,16 @@
+<!-- Title Component -->
+<!-- Usage: <Include component="element/Title">
+       <Param name="text" value="Welcome" />
+       <Param name="level" value="1" />
+     </Include>
+-->
+
+<If condition="level == 1">
+    <h1 class="title">{{text}}</h1>
+    <ElseIf condition="level == 2">
+        <h2 class="title">{{text}}</h2>
+        <ElseIf condition="level == 3">
+            <h3 class="title">{{text}}</h3>
+            <Else>
+                <h4 class="title">{{text}}</h4>
+</If>
