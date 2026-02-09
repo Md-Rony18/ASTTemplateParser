@@ -1,0 +1,335 @@
+<!-- ============================================================== -->
+<!--        AST Template Parser - Example Templates                 -->
+<!--        Using HTML-like syntax (no @ directives)                -->
+<!-- ============================================================== -->
+
+
+<!-- ======================== BASIC EXAMPLE ======================== -->
+<!-- Simple variable interpolation and elements -->
+
+<Element template="basic-page">
+    <header>
+        <h1>{{Title}}</h1>
+        <p>Welcome, {{UserName}}!</p>
+    </header>
+
+    <main>
+        <p>Today's date: {{CurrentDate}}</p>
+        <p>Your balance: ${{Balance}}</p>
+    </main>
+</Element>
+
+
+<!-- ======================== DATA SECTIONS ======================== -->
+<!-- Using Data tags for logical grouping -->
+
+<Element template="product-page">
+    <Data section="product-header">
+        <div class="product-title">
+            <h1>{{Product.Name}}</h1>
+            <span class="price">${{Product.Price}}</span>
+        </div>
+    </Data>
+
+    <Data section="product-details">
+        <p class="description">{{Product.Description}}</p>
+        <p class="category">Category: {{Product.Category}}</p>
+        <p class="sku">SKU: {{Product.SKU}}</p>
+    </Data>
+
+    <Data section="product-meta">
+        <span>Rating: {{Product.Rating}} / 5</span>
+        <span>Reviews: {{Product.ReviewCount}}</span>
+    </Data>
+</Element>
+
+
+<!-- ======================== CONDITIONALS ======================== -->
+<!-- <If>, <ElseIf>, <Else>, </If> syntax -->
+
+<Element template="user-dashboard">
+    <div class="dashboard">
+
+        <!-- Simple if -->
+        <If condition="IsLoggedIn">
+            <p>Welcome back, {{UserName}}!</p>
+        </If>
+
+        <!-- If-else -->
+        <If condition="HasNotifications">
+            <div class="notifications">
+                <span class="badge">{{NotificationCount}} new</span>
+            </div>
+            <Else>
+                <p>No new notifications</p>
+        </If>
+
+        <!-- If-elseif-else chain -->
+        <If condition="UserRole == 'admin'">
+            <nav class="admin-nav">
+                <a href="/admin">Admin Panel</a>
+                <a href="/users">Manage Users</a>
+            </nav>
+            <ElseIf condition="UserRole == 'moderator'">
+                <nav class="mod-nav">
+                    <a href="/mod">Moderation Tools</a>
+                </nav>
+                <Else>
+                    <nav class="user-nav">
+                        <a href="/profile">My Profile</a>
+                    </nav>
+        </If>
+
+        <!-- Nested conditionals -->
+        <If condition="IsPremium">
+            <div class="premium-badge">⭐ Premium Member</div>
+            <If condition="PremiumLevel > 2">
+                <span class="gold">Gold Status</span>
+            </If>
+        </If>
+
+    </div>
+</Element>
+
+
+<!-- ======================== LOOPS ======================== -->
+<!-- <ForEach var="item" in="collection"> syntax -->
+
+<Element template="product-list">
+    <div class="products">
+        <h2>Our Products</h2>
+
+        <!-- Simple loop -->
+        <ul class="product-grid">
+            <ForEach var="product" in="Products">
+                <li class="product-card">
+                    <h3>{{product.Name}}</h3>
+                    <p class="price">${{product.Price}}</p>
+                    <p>{{product.Description}}</p>
+                </li>
+            </ForEach>
+        </ul>
+
+        <!-- Loop with conditionals inside -->
+        <div class="featured-products">
+            <ForEach var="item" in="FeaturedItems">
+                <div class="featured-card">
+                    <h4>{{item.Title}}</h4>
+                    <If condition="item.IsOnSale">
+                        <span class="sale-badge">SALE!</span>
+                        <p class="original-price">${{item.OriginalPrice}}</p>
+                        <p class="sale-price">${{item.SalePrice}}</p>
+                        <Else>
+                            <p class="price">${{item.Price}}</p>
+                    </If>
+                </div>
+            </ForEach>
+        </div>
+    </div>
+</Element>
+
+
+<!-- ======================== NAVIGATION ======================== -->
+<!-- Nav tags with loops for menu structures -->
+
+<Nav section="main-menu">
+    <ul class="navbar">
+        <ForEach var="menuItem" in="MenuItems">
+            <li>
+                <a href="{{menuItem.Url}}">{{menuItem.Label}}</a>
+                <If condition="menuItem.HasChildren">
+                    <ul class="dropdown">
+                        <ForEach var="child" in="menuItem.Children">
+                            <li><a href="{{child.Url}}">{{child.Label}}</a></li>
+                        </ForEach>
+                    </ul>
+                </If>
+            </li>
+        </ForEach>
+    </ul>
+</Nav>
+
+
+<!-- ======================== BLOCKS ======================== -->
+<!-- Block tags for reusable content sections -->
+
+<Block name="sidebar-widget">
+    <aside class="widget">
+        <h3>{{WidgetTitle}}</h3>
+        <div class="widget-content">
+            {{WidgetContent}}
+        </div>
+        <If condition="ShowMoreLink">
+            <a href="{{MoreLink}}" class="more">Read more →</a>
+        </If>
+    </aside>
+</Block>
+
+<Block name="footer-section">
+    <footer>
+        <div class="footer-grid">
+            <ForEach var="column" in="FooterColumns">
+                <div class="footer-column">
+                    <h4>{{column.Title}}</h4>
+                    <ul>
+                        <ForEach var="link" in="column.Links">
+                            <li><a href="{{link.Url}}">{{link.Text}}</a></li>
+                        </ForEach>
+                    </ul>
+                </div>
+            </ForEach>
+        </div>
+        <p class="copyright">© {{Year}} {{CompanyName}}. All rights reserved.</p>
+    </footer>
+</Block>
+
+
+<!-- ======================== NESTED PROPERTIES ======================== -->
+<!-- Accessing deeply nested object properties -->
+
+<Element template="order-details">
+    <div class="order">
+        <h2>Order #{{Order.Id}}</h2>
+
+        <div class="customer-info">
+            <p>Customer: {{Order.Customer.Name}}</p>
+            <p>Email: {{Order.Customer.Email}}</p>
+            <p>Phone: {{Order.Customer.Phone}}</p>
+        </div>
+
+        <div class="shipping-address">
+            <h3>Shipping To:</h3>
+            <p>{{Order.ShippingAddress.Street}}</p>
+            <p>{{Order.ShippingAddress.City}}, {{Order.ShippingAddress.State}} {{Order.ShippingAddress.ZipCode}}</p>
+            <p>{{Order.ShippingAddress.Country}}</p>
+        </div>
+
+        <table class="order-items">
+            <thead>
+                <tr>
+                    <th>Product</th>
+                    <th>Qty</th>
+                    <th>Price</th>
+                    <th>Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                <ForEach var="item" in="Order.Items">
+                    <tr>
+                        <td>{{item.Product.Name}}</td>
+                        <td>{{item.Quantity}}</td>
+                        <td>${{item.UnitPrice}}</td>
+                        <td>${{item.TotalPrice}}</td>
+                    </tr>
+                </ForEach>
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td colspan="3">Subtotal:</td>
+                    <td>${{Order.Subtotal}}</td>
+                </tr>
+                <tr>
+                    <td colspan="3">Tax:</td>
+                    <td>${{Order.Tax}}</td>
+                </tr>
+                <tr class="total">
+                    <td colspan="3">Total:</td>
+                    <td>${{Order.Total}}</td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+</Element>
+
+
+<!-- ======================== COMPLEX CONDITIONS ======================== -->
+<!-- Using comparison operators in conditions -->
+
+<Element template="pricing-tier">
+    <div class="pricing">
+        <If condition="UserCount > 100">
+            <div class="tier enterprise">
+                <h3>Enterprise Plan</h3>
+                <p>Contact us for pricing</p>
+            </div>
+            <ElseIf condition="UserCount > 50">
+                <div class="tier business">
+                    <h3>Business Plan</h3>
+                    <p>$99/month</p>
+                </div>
+                <ElseIf condition="UserCount > 10">
+                    <div class="tier team">
+                        <h3>Team Plan</h3>
+                        <p>$49/month</p>
+                    </div>
+                    <Else>
+                        <div class="tier starter">
+                            <h3>Starter Plan</h3>
+                            <p>$19/month</p>
+                        </div>
+        </If>
+
+        <If condition="HasDiscount and DiscountPercent > 0">
+            <p class="discount">Save {{DiscountPercent}}% with annual billing!</p>
+        </If>
+    </div>
+</Element>
+
+
+<!-- ======================== SELF-CLOSING ELEMENTS ======================== -->
+<!-- Elements without children -->
+
+<Element template="icons" />
+
+<Data section="meta-info" />
+
+
+<!-- ======================== BLOG POST EXAMPLE ======================== -->
+<!-- Complex template with nested loops and conditionals -->
+
+<Element template="blog-post">
+    <article class="post">
+        <header>
+            <h1>{{Post.Title}}</h1>
+            <div class="meta">
+                <span class="author">By {{Post.Author.Name}}</span>
+                <span class="date">{{Post.PublishedDate}}</span>
+                <If condition="Post.Categories">
+                    <span class="categories">
+                        <ForEach var="cat" in="Post.Categories">
+                            <a href="/category/{{cat.Slug}}">{{cat.Name}}</a>
+                        </ForEach>
+                    </span>
+                </If>
+            </div>
+        </header>
+
+        <div class="content">
+            {{Post.Content}}
+        </div>
+
+        <If condition="Post.HasComments">
+            <section class="comments">
+                <h2>Comments ({{Post.CommentCount}})</h2>
+                <ForEach var="comment" in="Post.Comments">
+                    <div class="comment">
+                        <strong>{{comment.Author}}</strong>
+                        <span class="date">{{comment.Date}}</span>
+                        <p>{{comment.Text}}</p>
+
+                        <If condition="comment.Replies">
+                            <div class="replies">
+                                <ForEach var="reply" in="comment.Replies">
+                                    <div class="reply">
+                                        <strong>{{reply.Author}}</strong>
+                                        <p>{{reply.Text}}</p>
+                                    </div>
+                                </ForEach>
+                            </div>
+                        </If>
+                    </div>
+                </ForEach>
+            </section>
+        </If>
+    </article>
+</Element>

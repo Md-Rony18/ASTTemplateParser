@@ -1,0 +1,13 @@
+<div class="card">
+    <If condition="image">
+        <img src="{{image}}" alt="{{title}}" class="card-image" />
+    </If>
+    <div class="card-body">
+        <If condition="title">
+            <h3 class="card-title">{{title}}</h3>
+        </If>
+        <div class="card-content">
+            <p>{{content}}</p>
+        </div>
+    </div>
+</div>

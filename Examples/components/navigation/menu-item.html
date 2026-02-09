@@ -1,0 +1,17 @@
+<!-- Recursive Menu Item Component -->
+<!-- Renders menu items with unlimited depth nesting -->
+<!-- Usage: <Include component="navigation/menu-item"><Param name="items" value="menuItems" /></Include> -->
+
+<ForEach var="menuItem" in="items">
+    <li class="menu-item">
+        <a href="{{menuItem.Url}}" class="menu-link">{{menuItem.Label}}</a>
+        <If condition="menuItem.Children">
+            <ul class="submenu">
+                <!-- Recursive call: render children using same component -->
+                <Include component="navigation/menu-item">
+                    <Param name="items" value="menuItem.Children" />
+                </Include>
+            </ul>
+        </If>
+    </li>
+</ForEach>

@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net48;net6.0;net8.0</TargetFrameworks>
+    <RootNamespace>ASTTemplateParser</RootNamespace>
+    <AssemblyName>ASTTemplateParser</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    
+    <!-- NuGet Package Settings -->
+    <PackageId>ASTTemplateParser</PackageId>
+    <Version>2.0.3</Version>
+    <Authors>AST Template Parser Team</Authors>
+    <Company>Your Company</Company>
+    <Product>AST Template Parser</Product>
+    <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, and .NET 8.0+.</Description>
+    <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/yourusername/ASTTemplateParser</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/yourusername/ASTTemplateParser</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    
+    <!-- Package generation -->
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    
+    <!-- Release notes -->
+    <PackageReleaseNotes>
+v2.0.3 - (January 21, 2026)
+- ADDED: Template Filters with Pipe syntax (e.g. {{ Name | uppercase }}).
+- ADDED: Built-in filters: uppercase, lowercase, date, currency.
+- ADDED: Support for Filter Arguments (e.g. {{ Price | currency:"bn-BD" }}).
+- ADDED: Custom Filter Registration via TemplateEngine.RegisterFilter().
+- IMPROVED: Filter execution performance with cached delegates.
+
+v2.0.2 - (January 20, 2026)
+- FIXED: Resolved "Unsafe expression" errors by making SecurityConfig less restrictive by default.
+- FIXED: Improved regex for safe characters in expressions (bracket and quote support).
+- IMPROVED: Added detailed reason to TemplateSecurityException for easier debugging.
+- IMPROVED: Added support for IList and native Array indexing (e.g. item[0]).
+- IMPROVED: Exposed Security property on TemplateEngine for instance-level configuration.
+
+v2.0.1 - (January 20, 2026)
+- ADDED: High-performance Indexer Support (item[key]).
+- ADDED: Compiled delegate caching for indexers for maximum speed.
+- ADDED: Support for dynamic key resolution in templates.
+- IMPROVED: Expression evaluation robustness.
+- SECURITY: Enhanced indexer validation with BlockedPropertyNames.
+    </PackageReleaseNotes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NCalc.NetCore" Version="1.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
