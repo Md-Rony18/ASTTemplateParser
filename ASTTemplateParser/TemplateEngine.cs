@@ -445,16 +445,30 @@ namespace ASTTemplateParser
                 effectiveCacheKey = $"{cacheKey}_{dataHash}";
             }
 
-            // Resolve the full file path
-            string baseDirectory = !string.IsNullOrEmpty(_pagesDirectory) ? _pagesDirectory : _componentsDirectory;
-            if (string.IsNullOrEmpty(baseDirectory))
-                throw new InvalidOperationException("No directory configured. Call SetPagesDirectory() or SetComponentsDirectory() first.");
-
-            var fullPath = Path.Combine(baseDirectory, filePath);
-            string resolvedPath = ResolveTemplatePath(fullPath);
+            // Resolve the full file path - try both directories
+            string resolvedPath = null;
             
+            // Try pages directory first
+            if (!string.IsNullOrEmpty(_pagesDirectory))
+            {
+                var pagesPath = Path.Combine(_pagesDirectory, filePath);
+                resolvedPath = ResolveTemplatePath(pagesPath);
+            }
+            
+            // If not found, try components directory
+            if (string.IsNullOrEmpty(resolvedPath) && !string.IsNullOrEmpty(_componentsDirectory))
+            {
+                var componentsPath = Path.Combine(_componentsDirectory, filePath);
+                resolvedPath = ResolveTemplatePath(componentsPath);
+            }
+            
+            // If still not found, throw error
             if (string.IsNullOrEmpty(resolvedPath))
+            {
+                if (string.IsNullOrEmpty(_pagesDirectory) && string.IsNullOrEmpty(_componentsDirectory))
+                    throw new InvalidOperationException("No directory configured. Call SetPagesDirectory() or SetComponentsDirectory() first.");
                 throw new FileNotFoundException($"Template not found: {filePath}");
+            }
 
             // Check cache with file timestamp validation
             if (_renderCache.TryGetValue(effectiveCacheKey, out var cached))

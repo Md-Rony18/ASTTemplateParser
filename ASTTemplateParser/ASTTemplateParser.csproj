@@ -10,7 +10,7 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.0.5</Version>
+    <Version>2.0.4</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
@@ -30,16 +30,11 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
-v2.0.5 - (February 9, 2026)
-- ADDED: Data-aware caching with includeDataHash parameter.
-- ADDED: Automatic cache invalidation when variables change.
-- ADDED: ComputeDataHash() for fast variable fingerprinting.
-- IMPROVED: Cache key now includes data hash when includeDataHash=true.
-- PERFORMANCE: Hash calculation is ~0.01ms - negligible overhead.
-
 v2.0.4 - (February 9, 2026)
 - ADDED: High-Performance Render Template Caching (RenderCachedFile, RenderCached).
+- ADDED: Data-aware caching with includeDataHash parameter.
 - ADDED: Automatic file-based cache invalidation via timestamp detection.
+- ADDED: Automatic cache invalidation when variables change.
 - ADDED: Optional time-based cache expiration (TimeSpan).
 - ADDED: Cache management APIs: InvalidateCache, InvalidateCacheByPrefix, ClearRenderCache.
 - ADDED: Cache statistics via GetRenderCacheStats() for monitoring.
