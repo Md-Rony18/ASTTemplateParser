@@ -373,28 +373,77 @@ namespace ASTTemplateParser
             new ConcurrentDictionary<string, RenderCacheEntry>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
+        /// Computes a fast hash of all variables for data-aware caching.
+        /// When variables change, the hash changes, causing a cache miss.
+        /// </summary>
+        private string ComputeDataHash(IDictionary<string, object> additionalVariables)
+        {
+            unchecked
+            {
+                int hash = 17;
+                
+                // Include global variables
+                foreach (var kvp in _globalVariables.OrderBy(x => x.Key))
+                {
+                    hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
+                    hash = hash * 31 + (kvp.Value?.ToString()?.GetHashCode() ?? 0);
+                }
+                
+                // Include instance variables
+                foreach (var kvp in _variables.OrderBy(x => x.Key))
+                {
+                    hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
+                    hash = hash * 31 + (kvp.Value?.ToString()?.GetHashCode() ?? 0);
+                }
+                
+                // Include additional variables
+                if (additionalVariables != null)
+                {
+                    foreach (var kvp in additionalVariables.OrderBy(x => x.Key))
+                    {
+                        hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
+                        hash = hash * 31 + (kvp.Value?.ToString()?.GetHashCode() ?? 0);
+                    }
+                }
+                
+                return hash.ToString("X8"); // 8-char hex string
+            }
+        }
+
+        /// <summary>
         /// Renders a template file with automatic caching. 
         /// Cache is automatically invalidated when the file is modified.
+        /// When includeDataHash is true, cache also invalidates when variables change.
         /// This is the recommended method for high-performance template rendering.
         /// </summary>
         /// <param name="filePath">Relative path to the template file</param>
         /// <param name="cacheKey">Unique cache key for this render</param>
         /// <param name="expiration">Optional cache expiration time</param>
+        /// <param name="includeDataHash">If true, includes variable hash in cache key for automatic data-aware invalidation</param>
         /// <param name="additionalVariables">Optional dictionary of variables for this render</param>
         /// <returns>Rendered HTML string (from cache if available)</returns>
         /// <example>
-        /// // Basic usage - cache indefinitely until file changes
-        /// string html = engine.RenderCachedFile("pages/home.html", "homepage");
+        /// // Static content - fastest (no data hash)
+        /// string about = engine.RenderCachedFile("about.html", "about");
         /// 
-        /// // With expiration - cache for 5 minutes
-        /// string html = engine.RenderCachedFile("pages/about.html", "about", TimeSpan.FromMinutes(5));
+        /// // Data-dependent - auto invalidate when variables change
+        /// engine.SetVariable("User", currentUser);
+        /// string profile = engine.RenderCachedFile("profile.html", "profile", includeDataHash: true);
         /// </example>
-        public string RenderCachedFile(string filePath, string cacheKey, TimeSpan? expiration = null, IDictionary<string, object> additionalVariables = null)
+        public string RenderCachedFile(string filePath, string cacheKey, TimeSpan? expiration = null, bool includeDataHash = false, IDictionary<string, object> additionalVariables = null)
         {
             if (string.IsNullOrEmpty(filePath))
                 throw new ArgumentNullException(nameof(filePath));
             if (string.IsNullOrEmpty(cacheKey))
                 throw new ArgumentNullException(nameof(cacheKey));
+
+            // Compute effective cache key (with optional data hash)
+            string effectiveCacheKey = cacheKey;
+            if (includeDataHash)
+            {
+                var dataHash = ComputeDataHash(additionalVariables);
+                effectiveCacheKey = $"{cacheKey}_{dataHash}";
+            }
 
             // Resolve the full file path
             string baseDirectory = !string.IsNullOrEmpty(_pagesDirectory) ? _pagesDirectory : _componentsDirectory;
@@ -408,12 +457,12 @@ namespace ASTTemplateParser
                 throw new FileNotFoundException($"Template not found: {filePath}");
 
             // Check cache with file timestamp validation
-            if (_renderCache.TryGetValue(cacheKey, out var cached))
+            if (_renderCache.TryGetValue(effectiveCacheKey, out var cached))
             {
                 // Check if expired
                 if (cached.ExpiresAt.HasValue && DateTime.UtcNow > cached.ExpiresAt.Value)
                 {
-                    _renderCache.TryRemove(cacheKey, out _);
+                    _renderCache.TryRemove(effectiveCacheKey, out _);
                 }
                 // Check if file was modified
                 else
@@ -425,7 +474,7 @@ namespace ASTTemplateParser
                         return cached.RenderedOutput;
                     }
                     // File changed - invalidate cache
-                    _renderCache.TryRemove(cacheKey, out _);
+                    _renderCache.TryRemove(effectiveCacheKey, out _);
                 }
             }
 
@@ -443,34 +492,43 @@ namespace ASTTemplateParser
                 FilePath = resolvedPath,
                 FileLastModified = File.GetLastWriteTimeUtc(resolvedPath)
             };
-            _renderCache[cacheKey] = entry;
+            _renderCache[effectiveCacheKey] = entry;
 
             return rendered;
         }
 
         /// <summary>
         /// Renders a template string with caching.
-        /// Note: For string templates, use unique cache keys that change when the template content changes.
+        /// When includeDataHash is true, cache automatically invalidates when variables change.
         /// </summary>
         /// <param name="template">The template string</param>
         /// <param name="cacheKey">Unique cache key for this render</param>
         /// <param name="expiration">Optional cache expiration time</param>
+        /// <param name="includeDataHash">If true, includes variable hash in cache key for automatic data-aware invalidation</param>
         /// <param name="additionalVariables">Optional dictionary of variables for this render</param>
         /// <returns>Rendered HTML string (from cache if available)</returns>
-        public string RenderCached(string template, string cacheKey, TimeSpan? expiration = null, IDictionary<string, object> additionalVariables = null)
+        public string RenderCached(string template, string cacheKey, TimeSpan? expiration = null, bool includeDataHash = false, IDictionary<string, object> additionalVariables = null)
         {
             if (string.IsNullOrEmpty(template))
                 return string.Empty;
             if (string.IsNullOrEmpty(cacheKey))
                 throw new ArgumentNullException(nameof(cacheKey));
 
+            // Compute effective cache key (with optional data hash)
+            string effectiveCacheKey = cacheKey;
+            if (includeDataHash)
+            {
+                var dataHash = ComputeDataHash(additionalVariables);
+                effectiveCacheKey = $"{cacheKey}_{dataHash}";
+            }
+
             // Check cache
-            if (_renderCache.TryGetValue(cacheKey, out var cached))
+            if (_renderCache.TryGetValue(effectiveCacheKey, out var cached))
             {
                 // Check if expired
                 if (cached.ExpiresAt.HasValue && DateTime.UtcNow > cached.ExpiresAt.Value)
                 {
-                    _renderCache.TryRemove(cacheKey, out _);
+                    _renderCache.TryRemove(effectiveCacheKey, out _);
                 }
                 else
                 {
@@ -490,7 +548,7 @@ namespace ASTTemplateParser
                 FilePath = null,
                 FileLastModified = DateTime.MinValue
             };
-            _renderCache[cacheKey] = entry;
+            _renderCache[effectiveCacheKey] = entry;
 
             return rendered;
         }
