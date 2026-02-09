@@ -354,6 +354,226 @@ namespace ASTTemplateParser
 
         #endregion
 
+        #region Render Cache (Static - High Performance Output Caching)
+
+        /// <summary>
+        /// Cache entry for rendered output with file timestamp tracking
+        /// </summary>
+        private class RenderCacheEntry
+        {
+            public string RenderedOutput { get; set; }
+            public DateTime CachedAt { get; set; }
+            public DateTime? ExpiresAt { get; set; }
+            public string FilePath { get; set; }
+            public DateTime FileLastModified { get; set; }
+        }
+
+        // Render output cache - shared across ALL engine instances
+        private static readonly ConcurrentDictionary<string, RenderCacheEntry> _renderCache =
+            new ConcurrentDictionary<string, RenderCacheEntry>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Renders a template file with automatic caching. 
+        /// Cache is automatically invalidated when the file is modified.
+        /// This is the recommended method for high-performance template rendering.
+        /// </summary>
+        /// <param name="filePath">Relative path to the template file</param>
+        /// <param name="cacheKey">Unique cache key for this render</param>
+        /// <param name="expiration">Optional cache expiration time</param>
+        /// <param name="additionalVariables">Optional dictionary of variables for this render</param>
+        /// <returns>Rendered HTML string (from cache if available)</returns>
+        /// <example>
+        /// // Basic usage - cache indefinitely until file changes
+        /// string html = engine.RenderCachedFile("pages/home.html", "homepage");
+        /// 
+        /// // With expiration - cache for 5 minutes
+        /// string html = engine.RenderCachedFile("pages/about.html", "about", TimeSpan.FromMinutes(5));
+        /// </example>
+        public string RenderCachedFile(string filePath, string cacheKey, TimeSpan? expiration = null, IDictionary<string, object> additionalVariables = null)
+        {
+            if (string.IsNullOrEmpty(filePath))
+                throw new ArgumentNullException(nameof(filePath));
+            if (string.IsNullOrEmpty(cacheKey))
+                throw new ArgumentNullException(nameof(cacheKey));
+
+            // Resolve the full file path
+            string baseDirectory = !string.IsNullOrEmpty(_pagesDirectory) ? _pagesDirectory : _componentsDirectory;
+            if (string.IsNullOrEmpty(baseDirectory))
+                throw new InvalidOperationException("No directory configured. Call SetPagesDirectory() or SetComponentsDirectory() first.");
+
+            var fullPath = Path.Combine(baseDirectory, filePath);
+            string resolvedPath = ResolveTemplatePath(fullPath);
+            
+            if (string.IsNullOrEmpty(resolvedPath))
+                throw new FileNotFoundException($"Template not found: {filePath}");
+
+            // Check cache with file timestamp validation
+            if (_renderCache.TryGetValue(cacheKey, out var cached))
+            {
+                // Check if expired
+                if (cached.ExpiresAt.HasValue && DateTime.UtcNow > cached.ExpiresAt.Value)
+                {
+                    _renderCache.TryRemove(cacheKey, out _);
+                }
+                // Check if file was modified
+                else
+                {
+                    var currentModified = File.GetLastWriteTimeUtc(resolvedPath);
+                    if (currentModified <= cached.FileLastModified)
+                    {
+                        // Cache hit! Return cached output
+                        return cached.RenderedOutput;
+                    }
+                    // File changed - invalidate cache
+                    _renderCache.TryRemove(cacheKey, out _);
+                }
+            }
+
+            // Cache miss - render and cache
+            ValidateFilePath(resolvedPath);
+            var template = LoadTemplate(resolvedPath);
+            var rendered = Render(template, additionalVariables);
+
+            // Store in cache
+            var entry = new RenderCacheEntry
+            {
+                RenderedOutput = rendered,
+                CachedAt = DateTime.UtcNow,
+                ExpiresAt = expiration.HasValue ? DateTime.UtcNow.Add(expiration.Value) : (DateTime?)null,
+                FilePath = resolvedPath,
+                FileLastModified = File.GetLastWriteTimeUtc(resolvedPath)
+            };
+            _renderCache[cacheKey] = entry;
+
+            return rendered;
+        }
+
+        /// <summary>
+        /// Renders a template string with caching.
+        /// Note: For string templates, use unique cache keys that change when the template content changes.
+        /// </summary>
+        /// <param name="template">The template string</param>
+        /// <param name="cacheKey">Unique cache key for this render</param>
+        /// <param name="expiration">Optional cache expiration time</param>
+        /// <param name="additionalVariables">Optional dictionary of variables for this render</param>
+        /// <returns>Rendered HTML string (from cache if available)</returns>
+        public string RenderCached(string template, string cacheKey, TimeSpan? expiration = null, IDictionary<string, object> additionalVariables = null)
+        {
+            if (string.IsNullOrEmpty(template))
+                return string.Empty;
+            if (string.IsNullOrEmpty(cacheKey))
+                throw new ArgumentNullException(nameof(cacheKey));
+
+            // Check cache
+            if (_renderCache.TryGetValue(cacheKey, out var cached))
+            {
+                // Check if expired
+                if (cached.ExpiresAt.HasValue && DateTime.UtcNow > cached.ExpiresAt.Value)
+                {
+                    _renderCache.TryRemove(cacheKey, out _);
+                }
+                else
+                {
+                    // Cache hit!
+                    return cached.RenderedOutput;
+                }
+            }
+
+            // Cache miss - render and cache
+            var rendered = Render(template, additionalVariables);
+
+            var entry = new RenderCacheEntry
+            {
+                RenderedOutput = rendered,
+                CachedAt = DateTime.UtcNow,
+                ExpiresAt = expiration.HasValue ? DateTime.UtcNow.Add(expiration.Value) : (DateTime?)null,
+                FilePath = null,
+                FileLastModified = DateTime.MinValue
+            };
+            _renderCache[cacheKey] = entry;
+
+            return rendered;
+        }
+
+        /// <summary>
+        /// Invalidates (removes) a specific cache entry by key.
+        /// </summary>
+        /// <param name="cacheKey">The cache key to invalidate</param>
+        /// <returns>True if the cache entry was removed</returns>
+        public static bool InvalidateCache(string cacheKey)
+        {
+            return _renderCache.TryRemove(cacheKey, out _);
+        }
+
+        /// <summary>
+        /// Invalidates all cache entries whose keys start with the specified prefix.
+        /// Useful for invalidating related caches (e.g., all "user-*" caches).
+        /// </summary>
+        /// <param name="keyPrefix">The prefix to match</param>
+        /// <returns>Number of cache entries removed</returns>
+        public static int InvalidateCacheByPrefix(string keyPrefix)
+        {
+            if (string.IsNullOrEmpty(keyPrefix))
+                return 0;
+
+            int count = 0;
+            var keysToRemove = _renderCache.Keys
+                .Where(k => k.StartsWith(keyPrefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var key in keysToRemove)
+            {
+                if (_renderCache.TryRemove(key, out _))
+                    count++;
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Clears ALL render cache entries.
+        /// </summary>
+        public static void ClearRenderCache()
+        {
+            _renderCache.Clear();
+        }
+
+        /// <summary>
+        /// Checks if a render cache entry exists for the specified key.
+        /// </summary>
+        /// <param name="cacheKey">The cache key to check</param>
+        /// <returns>True if a cache entry exists (may be expired)</returns>
+        public static bool HasCachedRender(string cacheKey)
+        {
+            return _renderCache.ContainsKey(cacheKey);
+        }
+
+        /// <summary>
+        /// Gets the current count of render cache entries.
+        /// </summary>
+        public static int RenderCacheCount => _renderCache.Count;
+
+        /// <summary>
+        /// Gets cache statistics for monitoring.
+        /// </summary>
+        /// <returns>Dictionary with cache statistics</returns>
+        public static IDictionary<string, object> GetRenderCacheStats()
+        {
+            var now = DateTime.UtcNow;
+            var entries = _renderCache.Values.ToList();
+            
+            return new Dictionary<string, object>
+            {
+                { "TotalEntries", entries.Count },
+                { "ExpiredEntries", entries.Count(e => e.ExpiresAt.HasValue && now > e.ExpiresAt.Value) },
+                { "FileBasedEntries", entries.Count(e => !string.IsNullOrEmpty(e.FilePath)) },
+                { "StringBasedEntries", entries.Count(e => string.IsNullOrEmpty(e.FilePath)) },
+                { "TotalCachedBytes", entries.Sum(e => e.RenderedOutput?.Length ?? 0) * 2 } // Unicode = 2 bytes per char
+            };
+        }
+
+        #endregion
+
         /// <summary>
         /// Sets multiple variables at once
         /// </summary>

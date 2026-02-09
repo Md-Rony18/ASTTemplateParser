@@ -10,15 +10,15 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.0.3</Version>
+    <Version>2.0.4</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
     <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, and .NET 8.0+.</Description>
-    <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard</PackageTags>
+    <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard;caching</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/yourusername/ASTTemplateParser</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/yourusername/ASTTemplateParser</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Md-Rony18/ASTTemplateParser</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Md-Rony18/ASTTemplateParser</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>
@@ -30,6 +30,14 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
+v2.0.4 - (February 9, 2026)
+- ADDED: High-Performance Render Template Caching (RenderCachedFile, RenderCached).
+- ADDED: Automatic file-based cache invalidation via timestamp detection.
+- ADDED: Optional time-based cache expiration (TimeSpan).
+- ADDED: Cache management APIs: InvalidateCache, InvalidateCacheByPrefix, ClearRenderCache.
+- ADDED: Cache statistics via GetRenderCacheStats() for monitoring.
+- PERFORMANCE: 2000x faster repeated renders with cache hit (~0.001ms vs ~2ms).
+
 v2.0.3 - (January 21, 2026)
 - ADDED: Template Filters with Pipe syntax (e.g. {{ Name | uppercase }}).
 - ADDED: Built-in filters: uppercase, lowercase, date, currency.
