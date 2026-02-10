@@ -2,7 +2,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/ASTTemplateParser.svg)](https://www.nuget.org/packages/ASTTemplateParser/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![.NET](https://img.shields.io/badge/.NET-Standard%202.0%20%7C%204.8%20%7C%206.0%20%7C%208.0-purple.svg)](https://dotnet.microsoft.com/)
+[![.NET](https://img.shields.io/badge/.NET-Standard%202.0%20%7C%204.8%20%7C%206.0%20%7C%208.0%20%7C%209.0%20%7C%2010.0-purple.svg)](https://dotnet.microsoft.com/)
 
 A **blazing-fast**, **security-hardened** template engine for .NET with HTML-like syntax and **2000x faster cached rendering**.
 
@@ -26,7 +26,7 @@ A **blazing-fast**, **security-hardened** template engine for .NET with HTML-lik
 - 🧩 **Component System** - `<Element>`, `<Block>`, `<Data>`, `<Nav>` components
 - 📐 **Layout System** - Master layouts with sections and slots
 
-### Caching (NEW in v2.0.5)
+### Caching (v2.0.5)
 - ⚡ **Render Caching** - Cache rendered output for instant response
 - 🔄 **Auto File Invalidation** - Cache updates when template file changes
 - 📊 **Data-Aware Caching** - Auto-invalidate when variables change
@@ -37,6 +37,14 @@ A **blazing-fast**, **security-hardened** template engine for .NET with HTML-lik
 - 🧪 **Filters** - `{{ Name | uppercase }}`, `{{ Price | currency }}`
 - 🌐 **Global Variables** - Set once, use everywhere
 - 🔁 **Fragments** - `<Define>` and `<Render>` for recursion
+
+### Performance Optimizations (NEW in v2.0.6)
+- 🧮 **NCalc Expression Caching** - Parsed expression trees cached & reused (~2.5x faster)
+- ⚡ **ICollection Fast Path** - O(1) count check instead of enumerator allocation (~10x faster)
+- 📐 **Adaptive StringBuilder Pool** - Tiered small/large pools with template size hints
+- 📊 **Data Hash Dirty Flag** - Skip hash recomputation when variables unchanged (~50x faster)
+- 🗂️ **Pre-allocated Variable Merge** - Capacity estimation eliminates dictionary resizing
+- 🌐 **.NET 9.0 & 10.0 Support** - Full support for latest .NET frameworks
 
 ---
 
@@ -194,12 +202,27 @@ var engine = new TemplateEngine(security);
 | Operation | Speed | Notes |
 |-----------|-------|-------|
 | Cache Hit (Static) | **~0.001ms** | 1M+ ops/sec |
-| Cache Hit (Data Hash) | **~0.01ms** | 90K+ ops/sec |
+| Cache Hit (Data Hash) | **~0.003ms** | 300K+ ops/sec |
 | Normal Render | ~2ms | 500 ops/sec |
 | Property Access | ~0.00008ms | 12M+ ops/sec |
-| File Timestamp Check | ~0.001ms | Auto-invalidation |
+| NCalc Expression (cached) | ~0.2ms | 2.5x faster than uncached |
+| IsTruthy (ICollection) | ~0.001ms | 10x faster than enumerator |
+| Data Hash (unchanged) | ~0.001ms | 50x faster with dirty flag |
 
-*Tested on .NET 8.0 / Intel i7 / Windows 11*
+*Tested on .NET 8.0+ / Intel i7 / Windows 11*
+
+---
+
+## 🎯 Supported Frameworks
+
+| Framework | Version | Status |
+|-----------|---------|--------|
+| .NET Standard | 2.0 | ✅ Supported |
+| .NET Framework | 4.8 | ✅ Supported |
+| .NET | 6.0 | ✅ Supported |
+| .NET | 8.0 | ✅ Supported |
+| .NET | 9.0 | ✅ Supported |
+| .NET | 10.0 | ✅ Supported |
 
 ---
 
