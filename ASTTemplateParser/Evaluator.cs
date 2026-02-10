@@ -20,15 +20,18 @@ namespace ASTTemplateParser
         private int _currentLoopIterations;
         private int _currentRecursionDepth;
         
-        // Expression cache for NCalc - stores compiled Expression objects
-        private static readonly ConcurrentDictionary<string, Expression> _expressionCache =
-            new ConcurrentDictionary<string, Expression>();
+        // Expression cache for NCalc - stores cached parsed LogicalExpression trees
+        private static readonly ConcurrentDictionary<string, NCalc.Domain.LogicalExpression> _expressionCache =
+            new ConcurrentDictionary<string, NCalc.Domain.LogicalExpression>();
 
-        // StringBuilder pool
-        private static readonly ConcurrentBag<StringBuilder> _builderPool = 
+        // StringBuilder pool - tiered by size for adaptive reuse
+        private static readonly ConcurrentBag<StringBuilder> _builderPoolSmall = 
+            new ConcurrentBag<StringBuilder>();
+        private static readonly ConcurrentBag<StringBuilder> _builderPoolLarge = 
             new ConcurrentBag<StringBuilder>();
         private const int MaxPoolSize = 16;
         private const int MaxExpressionCacheSize = 1000;
+        private const int SmallBuilderThreshold = 4096;
 
         // Component loader delegate - set by TemplateEngine
         private Func<string, RootNode> _componentLoader;
@@ -45,9 +48,9 @@ namespace ASTTemplateParser
         // Template fragments defined with <Define> for inline recursion
         private Dictionary<string, DefineNode> _templateFragments = new Dictionary<string, DefineNode>(StringComparer.OrdinalIgnoreCase);
 
-        public Evaluator(Dictionary<string, object> variables = null, SecurityConfig security = null)
+        public Evaluator(Dictionary<string, object> variables = null, SecurityConfig security = null, int templateSizeHint = 0)
         {
-            _output = GetBuilder();
+            _output = GetBuilder(templateSizeHint > 0 ? templateSizeHint / 2 : 0);
             _variables = variables ?? new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             _security = security ?? SecurityConfig.Default;
             _currentLoopIterations = 0;
@@ -614,8 +617,29 @@ namespace ASTTemplateParser
         {
             try
             {
-                // Create new Expression to ensure correct parameter context
-                var ncalc = new Expression(expression);
+                // Try to get cached parsed LogicalExpression tree
+                // This avoids re-parsing the expression string every time
+                var cachedLogicalExpr = _expressionCache.GetOrAdd(expression, expr =>
+                {
+                    // Enforce cache size limit before adding
+                    if (_expressionCache.Count >= MaxExpressionCacheSize)
+                        EnforceExpressionCacheLimit();
+                    
+                    // Parse once and cache the LogicalExpression tree
+                    var tempExpr = new Expression(expr);
+                    return tempExpr.ParsedExpression;
+                });
+
+                // Create new Expression from cached parse tree (avoids re-parsing)
+                Expression ncalc;
+                if (cachedLogicalExpr != null)
+                {
+                    ncalc = new Expression(cachedLogicalExpr);
+                }
+                else
+                {
+                    ncalc = new Expression(expression);
+                }
                 
                 foreach(var kvp in variables) 
                 {
@@ -639,7 +663,7 @@ namespace ASTTemplateParser
             var keysToRemove = _expressionCache.Keys.Take(MaxExpressionCacheSize / 4).ToArray();
             foreach (var key in keysToRemove)
             {
-                Expression _;
+                NCalc.Domain.LogicalExpression _;
                 _expressionCache.TryRemove(key, out _);
             }
         }
@@ -723,7 +747,14 @@ namespace ASTTemplateParser
                 return true;
             }
             
-            // Collections: non-empty is true
+            // FAST PATH: ICollection.Count is O(1) for List, Array, Dictionary, HashSet, etc.
+            // This avoids allocating and disposing an enumerator just to check emptiness
+            if (value is ICollection collection)
+            {
+                return collection.Count > 0;
+            }
+            
+            // Collections: non-empty is true (fallback for non-ICollection enumerables)
             if (value is IEnumerable enumerable)
             {
                 var enumerator = enumerable.GetEnumerator();
@@ -910,24 +941,58 @@ namespace ASTTemplateParser
 
         #endregion
 
-        #region StringBuilder Pool
+        #region StringBuilder Pool (Adaptive)
 
-        private static StringBuilder GetBuilder()
+        /// <summary>
+        /// Gets a StringBuilder from the pool with adaptive sizing.
+        /// Uses a tiered pool strategy: small builders (≤4KB) and large builders (>4KB)
+        /// to reduce reallocations by matching builder capacity to expected output size.
+        /// </summary>
+        /// <param name="sizeHint">Expected output size hint (0 = use default 1024)</param>
+        private static StringBuilder GetBuilder(int sizeHint = 0)
         {
-            if (_builderPool.TryTake(out var sb))
+            if (sizeHint > SmallBuilderThreshold)
+            {
+                // Try large pool first for large templates
+                if (_builderPoolLarge.TryTake(out var largeSb))
+                {
+                    largeSb.Clear();
+                    // Ensure capacity matches the hint to avoid reallocation
+                    if (largeSb.Capacity < sizeHint)
+                        largeSb.Capacity = sizeHint;
+                    return largeSb;
+                }
+                return new StringBuilder(sizeHint);
+            }
+
+            // Small/default path
+            if (_builderPoolSmall.TryTake(out var sb))
             {
                 sb.Clear();
                 return sb;
             }
-            return new StringBuilder(1024);
+            return new StringBuilder(sizeHint > 0 ? sizeHint : 1024);
         }
 
         private static void ReturnBuilder(StringBuilder sb)
         {
-            if (_builderPool.Count < MaxPoolSize)
+            if (sb.Capacity > SmallBuilderThreshold)
             {
-                sb.Clear();
-                _builderPool.Add(sb);
+                // Return to large pool
+                if (_builderPoolLarge.Count < MaxPoolSize)
+                {
+                    sb.Clear();
+                    _builderPoolLarge.Add(sb);
+                }
+            }
+            else
+            {
+                // Return to small pool
+                if (_builderPoolSmall.Count < MaxPoolSize)
+                {
+                    sb.Clear();
+                    _builderPoolSmall.Add(sb);
+                }
             }
         }
 
@@ -1719,6 +1784,9 @@ namespace ASTTemplateParser
         public static void ClearExpressionCache()
         {
             _expressionCache.Clear();
+            // Drain pools - ConcurrentBag.Clear() not available on all target frameworks
+            while (_builderPoolSmall.TryTake(out _)) { }
+            while (_builderPoolLarge.TryTake(out _)) { }
         }
     }
 }

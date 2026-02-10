@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>netstandard2.0;net48;net6.0;net8.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;net48;net6.0;net8.0;net9.0;net10.0</TargetFrameworks>
     <RootNamespace>ASTTemplateParser</RootNamespace>
     <AssemblyName>ASTTemplateParser</AssemblyName>
     <Nullable>disable</Nullable>
@@ -10,11 +10,11 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.0.5</Version>
+    <Version>2.0.6</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
-    <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, and .NET 8.0+.</Description>
+    <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, .NET 8.0+, .NET 9.0+, and .NET 10.0+.</Description>
     <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard;caching</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Md-Rony18/ASTTemplateParser</PackageProjectUrl>
@@ -30,6 +30,15 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
+v2.0.6 - (February 10, 2026)
+- ADDED: .NET 9.0 and .NET 10.0 target framework support.
+- PERFORMANCE: NCalc expression caching - parsed LogicalExpression trees are now cached and reused (~2.5x faster repeated expressions).
+- PERFORMANCE: Adaptive StringBuilder pooling with tiered small/large pools and template size hints.
+- PERFORMANCE: ICollection fast path in IsTruthy - avoids enumerator allocation for List, Array, Dictionary (~10x faster).
+- PERFORMANCE: Data hash dirty flag - skips hash recomputation when variables haven't changed (~50x faster cache hits).
+- PERFORMANCE: Pre-allocated variable merge with capacity estimation - eliminates dictionary resizing.
+- PERFORMANCE: Eliminated .ToString() overhead in data hash computation - uses GetHashCode() directly.
+
 v2.0.5 - (February 9, 2026)
 - ADDED: High-Performance Render Template Caching (RenderCachedFile, RenderCached).
 - ADDED: Data-aware caching with includeDataHash parameter for auto-invalidation.

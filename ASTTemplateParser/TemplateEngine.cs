@@ -102,6 +102,10 @@ namespace ASTTemplateParser
         private readonly Dictionary<string, object> _variables;
         private readonly SecurityConfig _security;
         
+        // Dirty flag for data hash - avoids recomputing hash when variables haven't changed
+        private bool _variablesDirty = true;
+        private string _lastDataHash;
+        
         // Component, Layout, and Pages paths
         private string _componentsDirectory;
         private string _layoutsDirectory;
@@ -235,6 +239,7 @@ namespace ASTTemplateParser
             }
             
             _variables[key] = value;
+            _variablesDirty = true; // Mark hash as stale
             return this;
         }
 
@@ -349,6 +354,7 @@ namespace ASTTemplateParser
         public TemplateEngine ClearVariables()
         {
             _variables.Clear();
+            _variablesDirty = true; // Mark hash as stale
             return this;
         }
 
@@ -374,10 +380,17 @@ namespace ASTTemplateParser
 
         /// <summary>
         /// Computes a fast hash of all variables for data-aware caching.
+        /// Uses a dirty flag to avoid recomputing when variables haven't changed.
         /// When variables change, the hash changes, causing a cache miss.
         /// </summary>
         private string ComputeDataHash(IDictionary<string, object> additionalVariables)
         {
+            // Fast path: if no variables changed and no additional variables, return cached hash
+            if (!_variablesDirty && additionalVariables == null && _lastDataHash != null)
+            {
+                return _lastDataHash;
+            }
+
             unchecked
             {
                 int hash = 17;
@@ -386,14 +399,14 @@ namespace ASTTemplateParser
                 foreach (var kvp in _globalVariables.OrderBy(x => x.Key))
                 {
                     hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
-                    hash = hash * 31 + (kvp.Value?.ToString()?.GetHashCode() ?? 0);
+                    hash = hash * 31 + (kvp.Value?.GetHashCode() ?? 0);
                 }
                 
                 // Include instance variables
                 foreach (var kvp in _variables.OrderBy(x => x.Key))
                 {
                     hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
-                    hash = hash * 31 + (kvp.Value?.ToString()?.GetHashCode() ?? 0);
+                    hash = hash * 31 + (kvp.Value?.GetHashCode() ?? 0);
                 }
                 
                 // Include additional variables
@@ -402,11 +415,20 @@ namespace ASTTemplateParser
                     foreach (var kvp in additionalVariables.OrderBy(x => x.Key))
                     {
                         hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
-                        hash = hash * 31 + (kvp.Value?.ToString()?.GetHashCode() ?? 0);
+                        hash = hash * 31 + (kvp.Value?.GetHashCode() ?? 0);
                     }
                 }
                 
-                return hash.ToString("X8"); // 8-char hex string
+                var result = hash.ToString("X8"); // 8-char hex string
+                
+                // Cache the hash if no additional variables (common case)
+                if (additionalVariables == null)
+                {
+                    _lastDataHash = result;
+                    _variablesDirty = false;
+                }
+                
+                return result;
             }
         }
 
@@ -679,6 +701,8 @@ namespace ASTTemplateParser
                     }
                     catch { }
                 }
+                
+                _variablesDirty = true; // Mark hash as stale
             }
             return this;
         }
@@ -722,32 +746,12 @@ namespace ASTTemplateParser
             
             cacheEntry.LastAccessed = DateTime.UtcNow;
 
-            // Merge variables in order of priority: Global (lowest) → Instance → Additional (highest)
-            var evaluatorVars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-            
-            // 1. Add global variables first (lowest priority - can be overridden)
-            foreach (var kvp in _globalVariables)
-            {
-                evaluatorVars[kvp.Key] = kvp.Value;
-            }
-            
-            // 2. Add instance variables (override global)
-            foreach (var kvp in _variables)
-            {
-                evaluatorVars[kvp.Key] = kvp.Value;
-            }
-            
-            // 3. Add additional variables (highest priority - override all)
-            if (additionalVariables != null)
-            {
-                foreach (var kvp in additionalVariables)
-                {
-                    evaluatorVars[kvp.Key] = kvp.Value;
-                }
-            }
+            // Use layered variable lookup to avoid allocating a merged dictionary
+            // Priority: Additional (highest) → Instance → Global (lowest)
+            var evaluatorVars = new LayeredVariableLookup(_globalVariables, _variables, additionalVariables);
 
-            // Evaluate AST with merged variables
-            var evaluator = new Evaluator(evaluatorVars, _security);
+            // Evaluate AST with layered variables (pass template size as hint for StringBuilder sizing)
+            var evaluator = new Evaluator(evaluatorVars.ToMergedDictionary(), _security, template.Length);
             
             // Setup component loader if components directory is configured
             if (!string.IsNullOrEmpty(_componentsDirectory))
@@ -1534,5 +1538,60 @@ namespace ASTTemplateParser
         /// Parsed AST (internal use)
         /// </summary>
         internal RootNode Ast { get; set; }
+    }
+    /// <summary>
+    /// High-performance layered variable lookup that avoids creating a merged dictionary
+    /// for every Render() call. Queries layers in priority order:
+    /// Additional (highest) → Instance → Global (lowest)
+    /// </summary>
+    internal class LayeredVariableLookup
+    {
+        private readonly ConcurrentDictionary<string, object> _globals;
+        private readonly Dictionary<string, object> _instance;
+        private readonly IDictionary<string, object> _additional;
+
+        public LayeredVariableLookup(
+            ConcurrentDictionary<string, object> globals,
+            Dictionary<string, object> instance,
+            IDictionary<string, object> additional)
+        {
+            _globals = globals;
+            _instance = instance;
+            _additional = additional;
+        }
+
+        /// <summary>
+        /// Creates a merged dictionary with correct priority.
+        /// Pre-allocates capacity to avoid dictionary resizing.
+        /// </summary>
+        public Dictionary<string, object> ToMergedDictionary()
+        {
+            // Estimate total capacity to avoid dictionary resizes
+            int estimatedCapacity = _globals.Count + _instance.Count + (_additional?.Count ?? 0);
+            var merged = new Dictionary<string, object>(estimatedCapacity, StringComparer.OrdinalIgnoreCase);
+
+            // 1. Global (lowest priority)
+            foreach (var kvp in _globals)
+            {
+                merged[kvp.Key] = kvp.Value;
+            }
+
+            // 2. Instance (overrides global)
+            foreach (var kvp in _instance)
+            {
+                merged[kvp.Key] = kvp.Value;
+            }
+
+            // 3. Additional (highest priority, overrides all)
+            if (_additional != null)
+            {
+                foreach (var kvp in _additional)
+                {
+                    merged[kvp.Key] = kvp.Value;
+                }
+            }
+
+            return merged;
+        }
     }
 }
