@@ -10,12 +10,12 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.0.7</Version>
+    <Version>2.0.8</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
-    <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, .NET 8.0+, .NET 9.0+, and .NET 10.0+.</Description>
-    <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard;caching</PackageTags>
+    <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, block parser with mixed content support, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, .NET 8.0+, .NET 9.0+, and .NET 10.0+.</Description>
+    <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard;caching;block-parser</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Md-Rony18/ASTTemplateParser</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Md-Rony18/ASTTemplateParser</RepositoryUrl>
@@ -30,6 +30,18 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
+v2.0.8 - (February 15, 2026)
+- ADDED: Mixed Content Parsing - ParseTemplateSegments() method for page templates with both Block calls and raw HTML.
+- ADDED: TemplateSegment class with IsBlock/IsHtml helpers for easy segment type checking.
+- ADDED: ParseSegmentsFromContent() for parsing template strings directly.
+- ADDED: SegmentCacheCount property for monitoring segment cache usage.
+- PERFORMANCE: Pre-compiled static Regex (RegexOptions.Compiled) for block and param parsing (~3-5x faster regex).
+- PERFORMANCE: Segment results cached via ConcurrentDictionary (same pattern as ParseBlocks).
+- PERFORMANCE: OrdinalIgnoreCase on parameter dictionaries for consistent case-insensitive lookups.
+- SECURITY: Path traversal protection - ValidatePath() prevents reading files outside allowed directories.
+- SECURITY: Component path validation - blocks ../ and : characters in component attributes.
+- IMPROVED: ClearCache() now clears both block and segment caches simultaneously.
+
 v2.0.6 - (February 10, 2026)
 - ADDED: .NET 9.0 and .NET 10.0 target framework support.
 - PERFORMANCE: NCalc expression caching - parsed LogicalExpression trees are now cached and reused (~2.5x faster repeated expressions).

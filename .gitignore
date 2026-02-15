@@ -63,3 +63,6 @@ Desktop.ini
 *.cachefile
 *.VC.db
 *.VC.VC.opendb
+
+# Custom ignores
+ASTCircleCare_extracted/

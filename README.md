@@ -38,13 +38,20 @@ A **blazing-fast**, **security-hardened** template engine for .NET with HTML-lik
 - 🌐 **Global Variables** - Set once, use everywhere
 - 🔁 **Fragments** - `<Define>` and `<Render>` for recursion
 
-### Performance Optimizations (NEW in v2.0.6)
+### Performance Optimizations (v2.0.6)
 - 🧮 **NCalc Expression Caching** - Parsed expression trees cached & reused (~2.5x faster)
 - ⚡ **ICollection Fast Path** - O(1) count check instead of enumerator allocation (~10x faster)
 - 📐 **Adaptive StringBuilder Pool** - Tiered small/large pools with template size hints
 - 📊 **Data Hash Dirty Flag** - Skip hash recomputation when variables unchanged (~50x faster)
 - 🗂️ **Pre-allocated Variable Merge** - Capacity estimation eliminates dictionary resizing
 - 🌐 **.NET 9.0 & 10.0 Support** - Full support for latest .NET frameworks
+
+### Block Parser & Mixed Content (NEW in v2.0.8)
+- 🧱 **Block Parser** - Extract `<Block>` components from page templates with `ParseBlocks()`
+- 🔀 **Mixed Content Parsing** - `ParseTemplateSegments()` preserves both blocks AND raw HTML in order
+- ⚡ **Compiled Regex** - Pre-compiled `RegexOptions.Compiled` for ~3-5x faster parsing
+- 🔒 **Path Traversal Protection** - `ValidatePath()` prevents directory escape attacks
+- 🛡️ **Component Validation** - Blocks `../` and `:` in component paths
 
 ---
 
@@ -126,6 +133,63 @@ Console.WriteLine($"Cached pages: {stats["TotalEntries"]}");
 ```
 
 ---
+
+## 🧱 Block Parser (NEW in v2.0.8)
+
+### Parse Blocks from Page Templates
+```csharp
+var engine = new TemplateEngine();
+engine.SetPagesDirectory("./pages");
+
+var blockParser = new BlockParser(engine);
+
+// Extract <Block> components from page template
+var blocks = blockParser.ParseBlocks("home");
+
+foreach (var block in blocks)
+{
+    Console.WriteLine($"{block.Order}: {block.Name} → {block.ComponentPath}");
+    // 0: slider_un → slider
+    // 1: about_un → about/standard
+    // 2: blog_un → blog
+}
+```
+
+### Mixed Content — Blocks + Raw HTML
+```csharp
+// Parse page template that has BOTH <Block> calls AND raw HTML
+var segments = blockParser.ParseTemplateSegments("home");
+
+foreach (var segment in segments)
+{
+    if (segment.IsBlock)
+    {
+        // Render block via engine
+        var html = engine.RenderCachedFile(
+            "block/" + segment.Block.ComponentPath,
+            "block-" + segment.Block.ComponentPath);
+        output.AppendLine(html);
+    }
+    else if (segment.IsHtml)
+    {
+        // Raw HTML — directly append
+        output.AppendLine(segment.RawHtml);
+    }
+}
+```
+
+### Cache Management
+```csharp
+// Clear all block/segment caches
+BlockParser.ClearCache();
+
+// Clear specific template cache
+BlockParser.ClearCache("home");
+
+// Monitor cache
+Console.WriteLine($"Block cache: {BlockParser.CacheCount}");
+Console.WriteLine($"Segment cache: {BlockParser.SegmentCacheCount}");
+```
 
 ## 📖 Template Syntax
 
@@ -241,6 +305,17 @@ TemplateEngine.SetGlobalVariable("Year", DateTime.Now.Year);
 
 ## 🔧 API Reference
 
+### Block Parser Methods
+| Method | Description |
+|--------|-------------|
+| `ParseBlocks()` | Extract `<Block>` tags from page template |
+| `ParseTemplateSegments()` | ⭐ **NEW** - Parse blocks + raw HTML segments |
+| `ParseBlocksFromContent()` | Parse from string content |
+| `ParseSegmentsFromContent()` | Parse segments from string |
+| `ClearCache()` | Clear all block & segment caches |
+| `CacheCount` | Block cache entry count |
+| `SegmentCacheCount` | Segment cache entry count |
+
 ### Rendering Methods
 | Method | Description |
 |--------|-------------|
@@ -271,7 +346,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 - [📚 Full Documentation](DOCUMENTATION.md)
 - [🧩 Component Guide](COMPONENT_DEVELOPMENT_GUIDE.md)
-- [🎨 Frontend Guide](FRONTEND_GUIDE.md)
+- [🎨 Theme Build Guide](TEMPLATE_BUILD_GUIDE.md)
 - [📦 NuGet Package](https://www.nuget.org/packages/ASTTemplateParser/)
 
 ---

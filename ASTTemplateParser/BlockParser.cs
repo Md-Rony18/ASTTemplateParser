@@ -51,6 +51,42 @@ namespace ASTTemplateParser
     }
 
     /// <summary>
+    /// A segment in a page template - can be either a Block or raw HTML
+    /// </summary>
+    public class TemplateSegment
+    {
+        /// <summary>
+        /// Segment type: "block" or "html"
+        /// </summary>
+        public string Type { get; set; }
+
+        /// <summary>
+        /// Display order (0, 1, 2, ...)
+        /// </summary>
+        public int Order { get; set; }
+
+        /// <summary>
+        /// Block information (only when Type == "block")
+        /// </summary>
+        public BlockInfo Block { get; set; }
+
+        /// <summary>
+        /// Raw HTML content (only when Type == "html")
+        /// </summary>
+        public string RawHtml { get; set; }
+
+        /// <summary>
+        /// Whether this segment is a block
+        /// </summary>
+        public bool IsBlock { get { return Type == "block"; } }
+
+        /// <summary>
+        /// Whether this segment is raw HTML
+        /// </summary>
+        public bool IsHtml { get { return Type == "html"; } }
+    }
+
+    /// <summary>
     /// Parses Block-based page templates and extracts block information
     /// High-performance with static caching (no file change detection for max speed)
     /// </summary>
@@ -61,6 +97,19 @@ namespace ASTTemplateParser
         // Static cache for maximum performance (shared across all instances)
         private static readonly ConcurrentDictionary<string, List<BlockInfo>> _cache = 
             new ConcurrentDictionary<string, List<BlockInfo>>(StringComparer.OrdinalIgnoreCase);
+
+        // Static cache for segments (blocks + raw HTML)
+        private static readonly ConcurrentDictionary<string, List<TemplateSegment>> _segmentCache = 
+            new ConcurrentDictionary<string, List<TemplateSegment>>(StringComparer.OrdinalIgnoreCase);
+
+        // Pre-compiled regex for best performance (compiled once, used many times)
+        private static readonly Regex _blockRegex = new Regex(
+            @"<Block\s+([^>]*?)>(.*?)</Block>",
+            RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        private static readonly Regex _paramRegex = new Regex(
+            @"<Param\s+name=""([^""]+)""\s+value=""([^""]*)""\s*/>",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         /// <summary>
         /// Creates BlockParser without TemplateEngine (use full path in ParseBlocks)
@@ -101,6 +150,9 @@ namespace ASTTemplateParser
             {
                 templatePath += ".html";
             }
+
+            // Security: prevent path traversal
+            ValidatePath(templatePath, _engine.PagesDirectory);
 
             return ParseBlocksFromFile(templatePath, pageName);
         }
@@ -154,9 +206,8 @@ namespace ASTTemplateParser
         {
             var blocks = new List<BlockInfo>();
 
-            // Match Block tag with all attributes
-            var blockPattern = @"<Block\s+([^>]*?)>(.*?)</Block>";
-            var matches = Regex.Matches(content, blockPattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            // Match Block tag with all attributes (using pre-compiled regex)
+            var matches = _blockRegex.Matches(content);
 
             int order = 0;
             foreach (Match match in matches)
@@ -171,6 +222,10 @@ namespace ASTTemplateParser
                 string oldName = string.IsNullOrEmpty(oldNameAttr) ? name : oldNameAttr;
 
                 if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(component))
+                    continue;
+
+                // Security: validate component path (no path traversal)
+                if (component.Contains("..") || component.Contains(":"))
                     continue;
 
                 var block = new BlockInfo
@@ -190,14 +245,146 @@ namespace ASTTemplateParser
         }
 
         /// <summary>
+        /// Parses page template into ordered segments (blocks + raw HTML)
+        /// This preserves raw HTML between blocks in correct order
+        /// Results are cached for best performance
+        /// </summary>
+        /// <param name="pageName">Page name (e.g., "home" → pages/home.html)</param>
+        /// <returns>List of TemplateSegment in order</returns>
+        public List<TemplateSegment> ParseTemplateSegments(string pageName)
+        {
+            if (_engine == null)
+            {
+                throw new InvalidOperationException("TemplateEngine not configured. Use BlockParser(engine) constructor.");
+            }
+
+            if (string.IsNullOrEmpty(_engine.PagesDirectory))
+            {
+                throw new InvalidOperationException("PagesDirectory not configured. Call engine.SetPagesDirectory() first.");
+            }
+
+            var templatePath = Path.Combine(_engine.PagesDirectory, pageName);
+            if (!templatePath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+            {
+                templatePath += ".html";
+            }
+
+            // Security: prevent path traversal
+            ValidatePath(templatePath, _engine.PagesDirectory);
+
+            // Check cache first (no file I/O)
+            var cacheKey = templatePath.ToLowerInvariant();
+            if (_segmentCache.TryGetValue(cacheKey, out var cached))
+            {
+                return cached;
+            }
+
+            if (!File.Exists(templatePath))
+            {
+                throw new FileNotFoundException("Template not found: " + templatePath);
+            }
+
+            var content = File.ReadAllText(templatePath);
+            var segments = ParseSegmentsFromContent(content, pageName);
+
+            // Store in cache
+            _segmentCache[cacheKey] = segments;
+
+            return segments;
+        }
+
+        /// <summary>
+        /// Parses template content into ordered segments (blocks + raw HTML)
+        /// </summary>
+        /// <param name="content">Template content as string</param>
+        /// <param name="pageName">Page identifier</param>
+        /// <returns>List of TemplateSegment in order</returns>
+        public List<TemplateSegment> ParseSegmentsFromContent(string content, string pageName)
+        {
+            var segments = new List<TemplateSegment>();
+            // Use pre-compiled regex
+            var matches = _blockRegex.Matches(content);
+
+            int order = 0;
+            int lastEnd = 0;
+
+            foreach (Match match in matches)
+            {
+                // Capture raw HTML before this block
+                if (match.Index > lastEnd)
+                {
+                    var rawHtml = content.Substring(lastEnd, match.Index - lastEnd).Trim();
+                    if (!string.IsNullOrEmpty(rawHtml))
+                    {
+                        segments.Add(new TemplateSegment
+                        {
+                            Type = "html",
+                            Order = order++,
+                            RawHtml = rawHtml
+                        });
+                    }
+                }
+
+                // Parse block
+                var attributes = match.Groups[1].Value;
+                var blockContent = match.Groups[2].Value;
+
+                string component = ExtractAttribute(attributes, "component");
+                string name = ExtractAttribute(attributes, "name");
+                string oldNameAttr = ExtractAttribute(attributes, "oldname");
+                string oldName = string.IsNullOrEmpty(oldNameAttr) ? name : oldNameAttr;
+
+                if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(component)
+                    && !component.Contains("..") && !component.Contains(":")) // Security check
+                {
+                    var block = new BlockInfo
+                    {
+                        Name = name,
+                        OldName = oldName,
+                        ComponentPath = component,
+                        Order = order++,
+                        PageName = pageName,
+                        Parameters = ParseParameters(blockContent)
+                    };
+
+                    segments.Add(new TemplateSegment
+                    {
+                        Type = "block",
+                        Order = order - 1,
+                        Block = block
+                    });
+                }
+
+                lastEnd = match.Index + match.Length;
+            }
+
+            // Capture trailing raw HTML after last block
+            if (lastEnd < content.Length)
+            {
+                var trailing = content.Substring(lastEnd).Trim();
+                if (!string.IsNullOrEmpty(trailing))
+                {
+                    segments.Add(new TemplateSegment
+                    {
+                        Type = "html",
+                        Order = order++,
+                        RawHtml = trailing
+                    });
+                }
+            }
+
+            return segments;
+        }
+
+        /// <summary>
         /// Parses Param elements from block content
         /// </summary>
         private Dictionary<string, object> ParseParameters(string blockContent)
         {
-            var parameters = new Dictionary<string, object>();
+            var parameters = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
-            var paramPattern = @"<Param\s+name=""([^""]+)""\s+value=""([^""]*)""\s*/>";
-            var matches = Regex.Matches(blockContent, paramPattern, RegexOptions.IgnoreCase);
+            // Use pre-compiled regex
+            var matches = _paramRegex.Matches(blockContent);
 
             foreach (Match match in matches)
             {
@@ -225,6 +412,7 @@ namespace ASTTemplateParser
         public static void ClearCache()
         {
             _cache.Clear();
+            _segmentCache.Clear();
         }
 
         /// <summary>
@@ -235,11 +423,33 @@ namespace ASTTemplateParser
         {
             var cacheKey = templatePath.ToLowerInvariant();
             _cache.TryRemove(cacheKey, out _);
+            _segmentCache.TryRemove(cacheKey, out _);
         }
 
         /// <summary>
         /// Gets the current cache count
         /// </summary>
         public static int CacheCount => _cache.Count;
+
+        /// <summary>
+        /// Gets the current segment cache count
+        /// </summary>
+        public static int SegmentCacheCount => _segmentCache.Count;
+
+        /// <summary>
+        /// Validates that the resolved path is within the allowed base directory
+        /// Prevents path traversal attacks (e.g., ../../etc/passwd)
+        /// </summary>
+        private static void ValidatePath(string resolvedPath, string baseDirectory)
+        {
+            var fullResolved = Path.GetFullPath(resolvedPath);
+            var fullBase = Path.GetFullPath(baseDirectory);
+
+            if (!fullResolved.StartsWith(fullBase, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new UnauthorizedAccessException(
+                    "Access denied: template path is outside the allowed directory.");
+            }
+        }
     }
 }
