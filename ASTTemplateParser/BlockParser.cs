@@ -94,13 +94,25 @@ namespace ASTTemplateParser
     {
         private readonly TemplateEngine _engine;
 
-        // Static cache for maximum performance (shared across all instances)
-        private static readonly ConcurrentDictionary<string, List<BlockInfo>> _cache = 
-            new ConcurrentDictionary<string, List<BlockInfo>>(StringComparer.OrdinalIgnoreCase);
+        // Static cache for maximum performance with file modification tracking
+        private class BlockCacheEntry
+        {
+            public List<BlockInfo> Blocks { get; set; }
+            public DateTime LastModified { get; set; }
+        }
+
+        private class SegmentCacheEntry
+        {
+            public List<TemplateSegment> Segments { get; set; }
+            public DateTime LastModified { get; set; }
+        }
+
+        private static readonly ConcurrentDictionary<string, BlockCacheEntry> _cache = 
+            new ConcurrentDictionary<string, BlockCacheEntry>(StringComparer.OrdinalIgnoreCase);
 
         // Static cache for segments (blocks + raw HTML)
-        private static readonly ConcurrentDictionary<string, List<TemplateSegment>> _segmentCache = 
-            new ConcurrentDictionary<string, List<TemplateSegment>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly ConcurrentDictionary<string, SegmentCacheEntry> _segmentCache = 
+            new ConcurrentDictionary<string, SegmentCacheEntry>(StringComparer.OrdinalIgnoreCase);
 
         // Pre-compiled regex for best performance (compiled once, used many times)
         private static readonly Regex _blockRegex = new Regex(
@@ -174,24 +186,35 @@ namespace ASTTemplateParser
         /// </summary>
         private List<BlockInfo> ParseBlocksFromFile(string templatePath, string pageName)
         {
-            // Check cache first (best performance - no file I/O)
-            var cacheKey = templatePath.ToLowerInvariant();
-            if (_cache.TryGetValue(cacheKey, out var cached))
-            {
-                return cached;
-            }
-
-            // Not in cache - parse file
             if (!File.Exists(templatePath))
             {
                 throw new FileNotFoundException($"Template not found: {templatePath}");
             }
 
+            var lastWriteTime = File.GetLastWriteTimeUtc(templatePath);
+            var cacheKey = templatePath.ToLowerInvariant();
+
+            // Check cache with file modification validation
+            if (_cache.TryGetValue(cacheKey, out var cached))
+            {
+                if (cached.LastModified >= lastWriteTime)
+                {
+                    return cached.Blocks;
+                }
+                
+                // File modified - remove from cache
+                _cache.TryRemove(cacheKey, out _);
+            }
+
+            // Not in cache or modified - parse file
             var content = File.ReadAllText(templatePath);
             var blocks = ParseBlocksFromContent(content, pageName);
 
             // Store in cache
-            _cache[cacheKey] = blocks;
+            _cache[cacheKey] = new BlockCacheEntry { 
+                Blocks = blocks, 
+                LastModified = lastWriteTime 
+            };
 
             return blocks;
         }
@@ -272,23 +295,34 @@ namespace ASTTemplateParser
             // Security: prevent path traversal
             ValidatePath(templatePath, _engine.PagesDirectory);
 
-            // Check cache first (no file I/O)
-            var cacheKey = templatePath.ToLowerInvariant();
-            if (_segmentCache.TryGetValue(cacheKey, out var cached))
-            {
-                return cached;
-            }
-
             if (!File.Exists(templatePath))
             {
                 throw new FileNotFoundException("Template not found: " + templatePath);
+            }
+
+            var lastWriteTime = File.GetLastWriteTimeUtc(templatePath);
+            var cacheKey = templatePath.ToLowerInvariant();
+
+            // Check segments cache with file modification validation
+            if (_segmentCache.TryGetValue(cacheKey, out var cached))
+            {
+                if (cached.LastModified >= lastWriteTime)
+                {
+                    return cached.Segments;
+                }
+                
+                // File modified - remove from cache
+                _segmentCache.TryRemove(cacheKey, out _);
             }
 
             var content = File.ReadAllText(templatePath);
             var segments = ParseSegmentsFromContent(content, pageName);
 
             // Store in cache
-            _segmentCache[cacheKey] = segments;
+            _segmentCache[cacheKey] = new SegmentCacheEntry { 
+                Segments = segments, 
+                LastModified = lastWriteTime 
+            };
 
             return segments;
         }
@@ -302,7 +336,7 @@ namespace ASTTemplateParser
         public List<TemplateSegment> ParseSegmentsFromContent(string content, string pageName)
         {
             var segments = new List<TemplateSegment>();
-            // Use pre-compiled regex
+            // Use pre-compiled regex that handles Block tags
             var matches = _blockRegex.Matches(content);
 
             int order = 0;
@@ -325,7 +359,7 @@ namespace ASTTemplateParser
                     }
                 }
 
-                // Parse block
+                // Parse block attributes and content
                 var attributes = match.Groups[1].Value;
                 var blockContent = match.Groups[2].Value;
 
@@ -334,6 +368,7 @@ namespace ASTTemplateParser
                 string oldNameAttr = ExtractAttribute(attributes, "oldname");
                 string oldName = string.IsNullOrEmpty(oldNameAttr) ? name : oldNameAttr;
 
+                // Validate block - if invalid, treat as raw HTML so it doesn't disappear from UI
                 if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(component)
                     && !component.Contains("..") && !component.Contains(":")) // Security check
                 {
@@ -352,6 +387,16 @@ namespace ASTTemplateParser
                         Type = "block",
                         Order = order - 1,
                         Block = block
+                    });
+                }
+                else
+                {
+                    // Invalid block tag - preserve it as HTML so the user can see and fix it
+                    segments.Add(new TemplateSegment
+                    {
+                        Type = "html",
+                        Order = order++,
+                        RawHtml = match.Value
                     });
                 }
 

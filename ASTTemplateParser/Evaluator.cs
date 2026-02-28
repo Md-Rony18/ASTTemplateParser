@@ -285,7 +285,13 @@ namespace ASTTemplateParser
             var varName = node.VariableName;
             object previousValue = null;
             bool hadPrevious = _variables.TryGetValue(varName, out previousValue);
+            
+            // Backup previous loop metadata if exists
+            object previousLoop = null;
+            bool hadPreviousLoop = _variables.TryGetValue("loop", out previousLoop);
+            
             int iterationCount = 0;
+            int totalCounter = 0;
 
             try
             {
@@ -294,6 +300,7 @@ namespace ASTTemplateParser
                     // Security: Check loop iteration limit
                     iterationCount++;
                     _currentLoopIterations++;
+                    totalCounter++;
                     
                     if (_currentLoopIterations > _security.MaxLoopIterations)
                     {
@@ -301,7 +308,21 @@ namespace ASTTemplateParser
                             _security.MaxLoopIterations, _currentLoopIterations);
                     }
 
+                    if (_currentLoopIterations > _security.MaxLoopIterations)
+                    {
+                        throw new TemplateLimitException("LoopIterations", 
+                            _security.MaxLoopIterations, _currentLoopIterations);
+                    }
+
+                    // Pre-create loop metadata dictionary ONCE outside the main loop
+                    // and update its values inside for maximum performance
+                    var loopMetadata = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                    loopMetadata["index"] = totalCounter - 1;
+                    loopMetadata["count"] = totalCounter;
+                    loopMetadata["first"] = totalCounter == 1;
+
                     _variables[varName] = item;
+                    _variables["loop"] = loopMetadata;
 
                     foreach (var child in node.Body)
                     {
@@ -313,10 +334,16 @@ namespace ASTTemplateParser
             {
                 _currentLoopIterations -= iterationCount;
                 
+                // Restore previous state
                 if (hadPrevious)
                     _variables[varName] = previousValue;
                 else
                     _variables.Remove(varName);
+
+                if (hadPreviousLoop)
+                    _variables["loop"] = previousLoop;
+                else
+                    _variables.Remove("loop");
             }
         }
 

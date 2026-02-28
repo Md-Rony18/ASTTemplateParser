@@ -46,11 +46,19 @@ A **blazing-fast**, **security-hardened** template engine for .NET with HTML-lik
 - 🗂️ **Pre-allocated Variable Merge** - Capacity estimation eliminates dictionary resizing
 - 🌐 **.NET 9.0 & 10.0 Support** - Full support for latest .NET frameworks
 
-### Block Parser & Mixed Content (NEW in v2.0.8)
+### Block Parser & Mixed Content (NEW in v2.0.9)
 - 🧱 **Block Parser** - Extract `<Block>` components from page templates with `ParseBlocks()`
+- 🔄 **Auto File Invalidation** - `BlockParser` now automatically detects file changes and updates cache
 - 🔀 **Mixed Content Parsing** - `ParseTemplateSegments()` preserves both blocks AND raw HTML in order
 - ⚡ **Compiled Regex** - Pre-compiled `RegexOptions.Compiled` for ~3-5x faster parsing
 - 🔒 **Path Traversal Protection** - `ValidatePath()` prevents directory escape attacks
+
+### Loop Metadata & Dynamic Attributes (NEW in v2.1.0)
+- 🔢 **Loop Metadata** - Use `{{loop.index}}`, `{{loop.count}}`, and `{{loop.first}}` inside `ForEach`
+- 🏷️ **Attr Filter** - Render dynamic attributes only if value exists: `{{ myClass | attr:"class" }}`
+- 🧹 **Auto Attribute Cleanup** - Enable `RemoveEmptyAttributes` in `SecurityConfig` to auto-strip empty attributes
+- 🛠️ **Error-Tolerant Parsing** - `BlockParser` now preserves invalid block tags as HTML instead of removing them
+- 🚀 **Zero-Allocation Metadata** - Optimized metadata dictionary reuse for maximum loop performance
 - 🛡️ **Component Validation** - Blocks `../` and `:` in component paths
 
 ---

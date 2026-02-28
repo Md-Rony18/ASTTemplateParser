@@ -75,6 +75,14 @@ namespace ASTTemplateParser
                     return amount.ToString("C");
                 }
             });
+
+            // attr filter: outputs ' name="value"' only if value is not null/empty
+            // Usage: <div {{ MyClass | attr:"class" }}>
+            RegisterFilter("attr", (val, args) => {
+                if (val == null || string.IsNullOrWhiteSpace(val.ToString())) return string.Empty;
+                string attrName = args.Length > 0 ? args[0] : "data";
+                return $" {attrName}=\"{val}\"";
+            });
         }
 
         /// <summary>
@@ -765,7 +773,15 @@ namespace ASTTemplateParser
                 evaluator.SetIncludeCallback(_onBeforeIncludeRender, this, _onAfterIncludeRender);
             }
             
-            return evaluator.Evaluate(cacheEntry.Value);
+            var result = evaluator.Evaluate(cacheEntry.Value);
+            
+            // Post-process: Clean up empty attributes if enabled
+            if (_security.RemoveEmptyAttributes)
+            {
+                result = SecurityUtils.RemoveEmptyAttributes(result);
+            }
+            
+            return result;
         }
         
         /// <summary>
@@ -1192,7 +1208,15 @@ namespace ASTTemplateParser
                 evaluator.SetIncludeCallback(_onBeforeIncludeRender, this, _onAfterIncludeRender);
             }
             
-            return evaluator.Evaluate(prepared.Ast);
+            var result = evaluator.Evaluate(prepared.Ast);
+
+            // Post-process: Clean up empty attributes if enabled
+            if (_security.RemoveEmptyAttributes)
+            {
+                result = SecurityUtils.RemoveEmptyAttributes(result);
+            }
+
+            return result;
         }
 
         private static void ExtractIncludeNodesRecursive(List<AstNode> nodes, List<IncludeInfo> result)

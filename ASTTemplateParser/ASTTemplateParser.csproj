@@ -10,7 +10,7 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.0.8</Version>
+    <Version>2.1.0</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
@@ -30,6 +30,15 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
+v2.1.0 - (February 28, 2026)
+- ADDED: Loop Metadata - Automatic {{loop.index}}, {{loop.count}}, and {{loop.first}} support in ForEach.
+- ADDED: Attr Filter - Cleanly render attributes only when values exist (e.g., {{ class | attr:"class" }}).
+- ADDED: Auto-Cleanup - Option to automatically strip empty HTML attributes (RemoveEmptyAttributes in SecurityConfig).
+- IMPROVED: Error-Tolerant Block Parsing - Invalid blocks are now preserved as HTML instead of being hidden.
+- PERFORMANCE: Optimized loop metadata engine to minimize memory allocations.
+
+v2.0.9 - (February 28, 2026)
+
 v2.0.8 - (February 15, 2026)
 - ADDED: Mixed Content Parsing - ParseTemplateSegments() method for page templates with both Block calls and raw HTML.
 - ADDED: TemplateSegment class with IsBlock/IsHtml helpers for easy segment type checking.

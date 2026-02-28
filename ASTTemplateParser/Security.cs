@@ -76,6 +76,12 @@ namespace ASTTemplateParser
         /// </summary>
         public bool JavaScriptEncode { get; set; } = false;
 
+        /// <summary>
+        /// Whether to automatically remove empty HTML attributes like class="" or id="" (default: false)
+        /// Set to true to keep rendered HTML clean when variables are empty.
+        /// </summary>
+        public bool RemoveEmptyAttributes { get; set; } = false;
+
         #endregion
 
         #region Expression Security
@@ -502,6 +508,19 @@ namespace ASTTemplateParser
 
             // Remove all HTML tags
             return Regex.Replace(input, @"<[^>]*>", string.Empty, RegexOptions.Compiled);
+        }
+
+        /// <summary>
+        /// Automatically removes empty HTML attributes like class="" or id=""
+        /// </summary>
+        public static string RemoveEmptyAttributes(string input)
+        {
+            if (string.IsNullOrEmpty(input))
+                return input;
+
+            // Pattern: match whitespace followed by attribute name, =", optional internal whitespace, and closing "
+            // Example: [ class=""] or [ id="  "]
+            return Regex.Replace(input, @"\s+[a-zA-Z0-9-]+=""\s*""", string.Empty, RegexOptions.Compiled);
         }
 
         /// <summary>

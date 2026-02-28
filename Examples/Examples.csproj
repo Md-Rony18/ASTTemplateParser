@@ -6,15 +6,13 @@
     <RootNamespace>Examples</RootNamespace>
     <AssemblyName>Examples</AssemblyName>
     <LangVersion>latest</LangVersion>
-    <StartupObject>TestApp.FinalDeepTestProgram</StartupObject>
+    <StartupObject>ComprehensiveTest.Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\ASTTemplateParser\ASTTemplateParser.csproj" />
     <Compile Remove="IndexerTest.cs" />
-    <Compile Remove="ComprehensiveTest.cs" />
     <Compile Remove="MockRunTest.cs" />
-    <Compile Remove="PerformanceBenchmark.cs" />
     <Compile Remove="LiveCheck.cs" />
     <Compile Remove="SecurityDiag.cs" />
     <Compile Remove="IndexerBenchmark.cs" />
