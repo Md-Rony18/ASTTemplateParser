@@ -10,7 +10,7 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.2.3</Version>
+    <Version>2.2.4</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
@@ -30,6 +30,10 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
+v2.2.4 - (April 6, 2026)
+- FIXED: Ternary operator and comparison expressions inside interpolation tags now resolve correctly, including bracketed paths such as {{ item['Author'] == 'Rony' ? 'active' : 'inactive' }}.
+- IMPROVED: Expression resolution now preserves quoted literal branches and avoids misclassifying complex bracketed expressions during interpolation.
+
 v2.2.3 - (April 6, 2026)
 - FIXED: Ternary operator and complex logical conditions inside interpolation tags (e.g., {{ item['Prop'] == 'Val' ? 'a' : 'b' }}). Improved ResolveExpression logic to correctly delegate complex expressions to the NCalc engine instead of incorrectly treating them as simple indexers.
 

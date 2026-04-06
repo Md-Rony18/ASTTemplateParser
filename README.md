@@ -53,6 +53,11 @@ A **blazing-fast**, **security-hardened** template engine for .NET with HTML-lik
 - ⚡ **Compiled Regex** - Pre-compiled `RegexOptions.Compiled` for ~3-5x faster parsing
 - 🔒 **Path Traversal Protection** - `ValidatePath()` prevents directory escape attacks
 
+### Expression Fixes (NEW in v2.2.4 - April 6, 2026)
+- ✅ **Interpolation Ternary Support** — Ternary expressions inside `{{ ... }}` now resolve correctly, including bracketed paths such as `{{ item['Author'] == 'Rony' ? 'active' : 'inactive' }}`.
+- 🧠 **Comparison Resolution** — Equality and comparison expressions now preserve quoted literal branches instead of collapsing to empty output.
+- 🎯 **Bracketed Expression Handling** — Complex bracketed expressions are no longer misclassified as simple indexer lookups during interpolation.
+
 ### JsonPath Support (NEW in v2.2.1 - April 4, 2026)
 - 🗂️ **JsonPath Property** — `IncludeInfo` now exposes a `JsonPath` property, extracted from the `jsonpath="..."` attribute on component tags.
 - 🔗 **Full Pipeline Support** — Available in `PrepareTemplate()`, `ExtractIncludeNames()`, `OnBeforeIncludeRender`, and `OnAfterIncludeRender` callbacks.
@@ -236,10 +241,11 @@ Console.WriteLine($"Segment cache: {BlockParser.SegmentCacheCount}");
 
 ### Variables & Indexers
 ```html
-{{Name}}                      <!-- Simple -->
-{{User.Address.City}}         <!-- Nested -->
-{{Items[0].Title}}            <!-- Array -->
-{{Config["apiKey"]}}          <!-- Dictionary -->
+{{Name}}                                           <!-- Simple -->
+{{User.Address.City}}                              <!-- Nested -->
+{{Items[0].Title}}                                 <!-- Array -->
+{{Config["apiKey"]}}                               <!-- Dictionary -->
+{{ item['Author'] == 'Rony' ? 'active' : 'inactive' }} <!-- Interpolation ternary -->
 ```
 
 ### Filters

@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using NCalc;
 
 namespace ASTTemplateParser
@@ -383,6 +384,16 @@ namespace ASTTemplateParser
 
             expression = expression.Trim();
 
+            if (expression.Length >= 2)
+            {
+                char first = expression[0];
+                char last = expression[expression.Length - 1];
+                if ((first == '\'' && last == '\'') || (first == '"' && last == '"'))
+                {
+                    return CleanResult(expression);
+                }
+            }
+
             // ULTRA-FAST PATH: Simple variable name (no special chars)
             // Most template expressions are just simple names like {{ Name }}, {{ title }}
             // This avoids the character scan entirely for these common cases
@@ -485,14 +496,258 @@ namespace ASTTemplateParser
                 return CleanResult(ResolveNestedPath(expression, variables));
             }
 
+            // Ternary support: evaluate manually because NCalc.NetCore does not handle ?: expressions reliably
+            if (TryEvaluateTernaryExpression(expression, variables, out var ternaryResult))
+            {
+                return CleanResult(ternaryResult);
+            }
+
+            if (TryEvaluateComparisonExpression(expression, variables, out var comparisonResult))
+            {
+                return comparisonResult;
+            }
+
             // Complex expression - use NCalc (only if method calls allowed)
             if (!_security.AllowMethodCalls && hasParen)
             {
                 return null; // Block NCalc evaluation if method calls disabled and has parens
             }
-            
+
             var result = EvaluateNCalcExpression(expression, variables);
             return CleanResult(result);
+        }
+
+        private bool TryEvaluateTernaryExpression(string expression, IVariableContext variables, out object result)
+        {
+            result = null;
+
+            int questionIndex = FindTopLevelOperator(expression, '?');
+            if (questionIndex < 0)
+                return false;
+
+            int colonIndex = FindMatchingTernaryColon(expression, questionIndex);
+            if (colonIndex < 0)
+                return false;
+
+            string condition = expression.Substring(0, questionIndex).Trim();
+            string whenTrue = expression.Substring(questionIndex + 1, colonIndex - questionIndex - 1).Trim();
+            string whenFalse = expression.Substring(colonIndex + 1).Trim();
+
+            bool conditionResult = IsTruthy(ResolveExpression(condition, variables));
+            result = ResolveExpression(conditionResult ? whenTrue : whenFalse, variables);
+            return true;
+        }
+
+        private bool TryEvaluateComparisonExpression(string expression, IVariableContext variables, out object result)
+        {
+            result = null;
+
+            string[] operators = { "==", "!=", ">=", "<=", ">", "<" };
+            foreach (string op in operators)
+            {
+                int operatorIndex = FindTopLevelOperator(expression, op);
+                if (operatorIndex < 0)
+                    continue;
+
+                string leftText = expression.Substring(0, operatorIndex).Trim();
+                string rightText = expression.Substring(operatorIndex + op.Length).Trim();
+
+                object left = ResolveExpression(leftText, variables);
+                object right = ResolveExpression(rightText, variables);
+                result = CompareValues(left, right, op);
+                return true;
+            }
+
+            return false;
+        }
+
+        private int FindTopLevelOperator(string expression, char target)
+        {
+            int bracketDepth = 0;
+            int parenDepth = 0;
+            bool inSingleQuote = false;
+            bool inDoubleQuote = false;
+
+            for (int i = 0; i < expression.Length; i++)
+            {
+                char c = expression[i];
+                char prev = i > 0 ? expression[i - 1] : '\0';
+
+                if (c == '\'' && !inDoubleQuote && prev != '\\')
+                {
+                    inSingleQuote = !inSingleQuote;
+                    continue;
+                }
+
+                if (c == '"' && !inSingleQuote && prev != '\\')
+                {
+                    inDoubleQuote = !inDoubleQuote;
+                    continue;
+                }
+
+                if (inSingleQuote || inDoubleQuote)
+                    continue;
+
+                switch (c)
+                {
+                    case '[': bracketDepth++; break;
+                    case ']': bracketDepth--; break;
+                    case '(': parenDepth++; break;
+                    case ')': parenDepth--; break;
+                    default:
+                        if (c == target && bracketDepth == 0 && parenDepth == 0)
+                            return i;
+                        break;
+                }
+            }
+
+            return -1;
+        }
+
+        private int FindTopLevelOperator(string expression, string target)
+        {
+            if (string.IsNullOrEmpty(target))
+                return -1;
+
+            int bracketDepth = 0;
+            int parenDepth = 0;
+            bool inSingleQuote = false;
+            bool inDoubleQuote = false;
+
+            for (int i = 0; i <= expression.Length - target.Length; i++)
+            {
+                char c = expression[i];
+                char prev = i > 0 ? expression[i - 1] : '\0';
+
+                if (c == '\'' && !inDoubleQuote && prev != '\\')
+                {
+                    inSingleQuote = !inSingleQuote;
+                    continue;
+                }
+
+                if (c == '"' && !inSingleQuote && prev != '\\')
+                {
+                    inDoubleQuote = !inDoubleQuote;
+                    continue;
+                }
+
+                if (inSingleQuote || inDoubleQuote)
+                    continue;
+
+                switch (c)
+                {
+                    case '[': bracketDepth++; continue;
+                    case ']': bracketDepth--; continue;
+                    case '(': parenDepth++; continue;
+                    case ')': parenDepth--; continue;
+                }
+
+                if (bracketDepth == 0 && parenDepth == 0 && string.CompareOrdinal(expression, i, target, 0, target.Length) == 0)
+                    return i;
+            }
+
+            return -1;
+        }
+
+        private static bool CompareValues(object left, object right, string op)
+        {
+            if (left is IComparable leftComparable && right != null && TryConvertComparable(right, left.GetType(), out var convertedRight))
+            {
+                int compare = leftComparable.CompareTo(convertedRight);
+                return op switch
+                {
+                    "==" => compare == 0,
+                    "!=" => compare != 0,
+                    ">" => compare > 0,
+                    "<" => compare < 0,
+                    ">=" => compare >= 0,
+                    "<=" => compare <= 0,
+                    _ => false
+                };
+            }
+
+            bool equals = object.Equals(left?.ToString(), right?.ToString());
+            return op switch
+            {
+                "==" => equals,
+                "!=" => !equals,
+                _ => false
+            };
+        }
+
+        private static bool TryConvertComparable(object value, Type targetType, out object converted)
+        {
+            converted = null;
+            if (value == null)
+                return false;
+
+            if (targetType.IsInstanceOfType(value))
+            {
+                converted = value;
+                return true;
+            }
+
+            try
+            {
+                converted = Convert.ChangeType(value, targetType);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private int FindMatchingTernaryColon(string expression, int questionIndex)
+        {
+            int bracketDepth = 0;
+            int parenDepth = 0;
+            int nestedTernaryDepth = 0;
+            bool inSingleQuote = false;
+            bool inDoubleQuote = false;
+
+            for (int i = questionIndex + 1; i < expression.Length; i++)
+            {
+                char c = expression[i];
+                char prev = i > 0 ? expression[i - 1] : '\0';
+
+                if (c == '\'' && !inDoubleQuote && prev != '\\')
+                {
+                    inSingleQuote = !inSingleQuote;
+                    continue;
+                }
+
+                if (c == '"' && !inSingleQuote && prev != '\\')
+                {
+                    inDoubleQuote = !inDoubleQuote;
+                    continue;
+                }
+
+                if (inSingleQuote || inDoubleQuote)
+                    continue;
+
+                switch (c)
+                {
+                    case '[': bracketDepth++; break;
+                    case ']': bracketDepth--; break;
+                    case '(': parenDepth++; break;
+                    case ')': parenDepth--; break;
+                    case '?':
+                        if (bracketDepth == 0 && parenDepth == 0)
+                            nestedTernaryDepth++;
+                        break;
+                    case ':':
+                        if (bracketDepth == 0 && parenDepth == 0)
+                        {
+                            if (nestedTernaryDepth == 0)
+                                return i;
+                            nestedTernaryDepth--;
+                        }
+                        break;
+                }
+            }
+
+            return -1;
         }
 
         /// <summary>
@@ -769,39 +1024,40 @@ namespace ASTTemplateParser
 
         private object EvaluateNCalcExpression(string expression, IVariableContext variables)
         {
+            if (string.IsNullOrWhiteSpace(expression)) return null;
+
+            // Convert C#-style indexer syntax item['Prop'] or item["Prop"] to NCalc-compatible [item.Prop]
+            // This allows NCalc to treat the entire path as a single parameter name
+            expression = Regex.Replace(expression, @"(\w+)\[['""](.+?)['""]\]", "[$1.$2]");
+            // Handle multiple levels if needed, e.g., [item.Meta]['Value'] -> [[item.Meta].Value]
+            // We'll simplify and just ensure the brackets are correctly placed for NCalc
+            expression = Regex.Replace(expression, @"\]\[['""](.+?)['""]\]", ".$1]");
+
             try
             {
-                // Enforce cache size limit before adding (outside GetOrAdd to avoid race condition)
+                // Enforce cache size limit before adding
                 if (_expressionCache.Count >= MaxExpressionCacheSize)
                     EnforceExpressionCacheLimit();
 
-                // Try to get cached parsed LogicalExpression tree
-                // This avoids re-parsing the expression string every time
-                var cachedLogicalExpr = _expressionCache.GetOrAdd(expression, expr =>
+                // Get or Add parsed logical expression
+                var cachedLogicalExpr = _expressionCache.GetOrAdd(expression, exprStr =>
                 {
-                    // Parse once and cache the LogicalExpression tree
-                    var tempExpr = new Expression(expr);
-                    return tempExpr.ParsedExpression;
+                    return new Expression(exprStr).ParsedExpression;
                 });
 
-                // Create new Expression from cached parse tree (avoids re-parsing)
-                Expression ncalc;
-                if (cachedLogicalExpr != null)
-                {
-                    ncalc = new Expression(cachedLogicalExpr);
-                }
-                else
-                {
-                    ncalc = new Expression(expression);
-                }
+                var ncalc = new Expression(cachedLogicalExpr);
                 
-                // PERFORMANCE: Use ToDictionary() for NCalc — it needs a flat dictionary
-                // This is called only for complex expressions, not simple variable lookups
-                var flatVars = variables.ToDictionary();
-                foreach(var kvp in flatVars) 
+                Console.WriteLine($"NCalc evaluating: {expression}");
+
+                // Handle parameters manually to support dot notation (nested objects and dictionaries)
+                ncalc.EvaluateParameter += (name, args) =>
                 {
-                    ncalc.Parameters[kvp.Key] = kvp.Value;
-                }
+                    if (variables == null) return;
+                    
+                    var val = ResolvePropertyPath(variables, name);
+                    Console.WriteLine($"NCalc parameter [{name}] resolved to: {val}");
+                    args.Result = val;
+                };
 
                 return ncalc.Evaluate();
             }
@@ -809,6 +1065,23 @@ namespace ASTTemplateParser
             {
                 return null;
             }
+        }
+
+        private object ResolvePropertyPath(IVariableContext variables, string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+
+            string[] parts = path.Split('.');
+            
+            // Start from the root variable
+            object current = variables[parts[0]];
+            
+            for (int i = 1; i < parts.Length && current != null; i++)
+            {
+                current = PropertyAccessor.GetValue(current, parts[i]);
+            }
+
+            return current;
         }
 
         /// <summary>
