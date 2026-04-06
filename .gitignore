@@ -66,3 +66,4 @@ Desktop.ini
 
 # Custom ignores
 ASTCircleCare_extracted/
+.claude/
