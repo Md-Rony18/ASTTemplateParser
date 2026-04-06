@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -24,11 +25,28 @@ namespace ASTTemplateParser
         private static readonly ConcurrentDictionary<string, string> _pathCache =
             new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        // Cache for raw file content used by ReadFile helper
+        private static readonly ConcurrentDictionary<string, CacheEntry<string>> _fileCache =
+            new ConcurrentDictionary<string, CacheEntry<string>>(StringComparer.OrdinalIgnoreCase);
+
         private static readonly object _cacheLock = new object();
 
-        // Global variables - shared across ALL engine instances
+        // Component version counter - incremented when any component file changes
+        // Used by RenderCachedFile to detect stale cache entries when included components are modified
+        private static long _componentVersion = 0;
+
+        // App-level global variables - shared across ALL engine instances and ALL websites
         private static readonly ConcurrentDictionary<string, object> _globalVariables =
             new ConcurrentDictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+
+        // Global variables version - incremented when any global variable is changed
+        // Used by ComputeDataHash to detect when cached renders become stale due to global changes
+        private static long _globalVariablesVersion = 0;
+
+        // Website-scoped global variables - isolated per website ID
+        // Key: websiteId, Value: that website's global variables
+        private static readonly ConcurrentDictionary<int, ConcurrentDictionary<string, object>> _websiteGlobals =
+            new ConcurrentDictionary<int, ConcurrentDictionary<string, object>>();
 
         // Filter Registry - shared across ALL engine instances
         public delegate object FilterDelegate(object value, string[] args);
@@ -83,6 +101,9 @@ namespace ASTTemplateParser
                 string attrName = args.Length > 0 ? args[0] : "data";
                 return $" {attrName}=\"{val}\"";
             });
+
+            // raw filter: bypasses HTML encoding
+            RegisterFilter("raw", (val, args) => val == null ? null : new RawString(val.ToString()));
         }
 
         /// <summary>
@@ -114,10 +135,21 @@ namespace ASTTemplateParser
         private bool _variablesDirty = true;
         private string _lastDataHash;
         
+        // Website ID for website-scoped globals
+        private int _websiteId;
+        private ConcurrentDictionary<string, object> _myWebsiteGlobals;
+        private long _lastGlobalVariablesVersion = -1;
+        
         // Component, Layout, and Pages paths
         private string _componentsDirectory;
         private string _layoutsDirectory;
         private string _pagesDirectory;
+
+        // Local fallback/override paths (per-engine instance)
+        // Used in conjunction with SetLocalComponentsDirectory() / SetLocalPagesDirectory()
+        private string _localComponentsDirectory;
+        private string _localPagesDirectory;
+        private bool _preferGlobalDirectory = false; // default: local path has priority
         
         /// <summary>
         /// Gets the configured components directory path
@@ -138,6 +170,21 @@ namespace ASTTemplateParser
         /// Gets the configured pages directory path
         /// </summary>
         public string PagesDirectory => _pagesDirectory;
+
+        /// <summary>
+        /// Gets the configured local components directory path
+        /// </summary>
+        public string LocalComponentsDirectory => _localComponentsDirectory;
+
+        /// <summary>
+        /// Gets the configured local pages directory path
+        /// </summary>
+        public string LocalPagesDirectory => _localPagesDirectory;
+
+        /// <summary>
+        /// Gets whether the global directory takes priority over the local directory
+        /// </summary>
+        public bool PreferGlobalDirectory => _preferGlobalDirectory;
         
         /// <summary>
         /// Callback that fires BEFORE each Include component renders.
@@ -158,7 +205,9 @@ namespace ASTTemplateParser
         public TemplateEngine(SecurityConfig security)
         {
             _variables = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-            _security = security ?? SecurityConfig.Default;
+            // Each engine gets its own SecurityConfig to prevent thread-safety issues
+            // when mutating AllowedTemplatePaths from SetComponentsDirectory/SetLayoutsDirectory/SetPagesDirectory
+            _security = security ?? new SecurityConfig();
         }
         
         /// <summary>
@@ -234,6 +283,55 @@ namespace ASTTemplateParser
         }
 
         /// <summary>
+        /// Sets a local components directory path.
+        /// By default (preferGlobal=false), this path takes PRIORITY over SetComponentsDirectory().
+        /// Use SetDirectoryPriority(preferGlobal: true) to reverse the lookup order.
+        /// </summary>
+        /// <example>
+        /// engine.SetComponentsDirectory(website.GetComponentPath());   // global/theme path
+        /// engine.SetLocalComponentsDirectory(localThemePath);           // local/override path
+        /// // Default: localThemePath is checked first
+        /// </example>
+        public TemplateEngine SetLocalComponentsDirectory(string path)
+        {
+            _localComponentsDirectory = Path.GetFullPath(path);
+            if (!_security.AllowedTemplatePaths.Contains(_localComponentsDirectory))
+                _security.AllowedTemplatePaths.Add(_localComponentsDirectory);
+            return this;
+        }
+
+        /// <summary>
+        /// Sets a local pages directory path.
+        /// By default (preferGlobal=false), this path takes PRIORITY over SetPagesDirectory().
+        /// Use SetDirectoryPriority(preferGlobal: true) to reverse the lookup order.
+        /// </summary>
+        public TemplateEngine SetLocalPagesDirectory(string path)
+        {
+            _localPagesDirectory = Path.GetFullPath(path);
+            if (!_security.AllowedTemplatePaths.Contains(_localPagesDirectory))
+                _security.AllowedTemplatePaths.Add(_localPagesDirectory);
+            return this;
+        }
+
+        /// <summary>
+        /// Sets the directory lookup priority for dual-path resolution.
+        /// preferGlobal=false (default): Local path is checked FIRST, global path is the fallback.
+        /// preferGlobal=true:  Global path (SetComponentsDirectory/SetPagesDirectory) is checked FIRST, local is the fallback.
+        /// </summary>
+        /// <example>
+        /// // Default — local overrides global
+        /// engine.SetDirectoryPriority(preferGlobal: false);
+        ///
+        /// // Global has precedence, local is fallback
+        /// engine.SetDirectoryPriority(preferGlobal: true);
+        /// </example>
+        public TemplateEngine SetDirectoryPriority(bool preferGlobal)
+        {
+            _preferGlobalDirectory = preferGlobal;
+            return this;
+        }
+
+        /// <summary>
         /// Sets a variable for template rendering
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -259,64 +357,110 @@ namespace ASTTemplateParser
             return _variables;
         }
 
-        #region Global Variables (Static - Shared Across All Instances)
+        #region Website-Scoped Engine Configuration
 
         /// <summary>
-        /// Sets a GLOBAL variable that persists across ALL TemplateEngine instances.
-        /// Global variables are available in every template render without needing to set them again.
-        /// Instance variables (SetVariable) override global variables with the same name.
+        /// Sets the website ID for this engine instance.
+        /// This determines which website-scoped globals are used during rendering.
+        /// </summary>
+        public TemplateEngine SetWebsiteId(int websiteId)
+        {
+            _websiteId = websiteId;
+            _myWebsiteGlobals = _websiteGlobals.GetOrAdd(websiteId,
+                _ => new ConcurrentDictionary<string, object>(StringComparer.OrdinalIgnoreCase));
+            return this;
+        }
+
+        /// <summary>
+        /// Gets the current website ID for this engine instance.
+        /// </summary>
+        public int WebsiteId => _websiteId;
+
+        /// <summary>
+        /// Gets the count of websites that have scoped globals.
+        /// </summary>
+        public static int WebsiteGlobalCount => _websiteGlobals.Count;
+
+        /// <summary>
+        /// Clears website-scoped globals for ALL websites.
+        /// </summary>
+        public static void ClearAllWebsiteGlobals()
+        {
+            _websiteGlobals.Clear();
+        }
+
+        #endregion
+
+        #region Global Variables (App-Wide or Website-Scoped)
+
+        /// <summary>
+        /// Sets a global variable. 
+        /// Without websiteId: app-wide global, available in ALL websites.
+        /// With websiteId: website-scoped global, available only for that specific website.
         /// </summary>
         /// <param name="key">Variable name</param>
         /// <param name="value">Variable value</param>
+        /// <param name="websiteId">Optional. If provided, variable is scoped to this website only.</param>
         /// <example>
-        /// // Set once at application startup
-        /// TemplateEngine.SetGlobalVariable("SiteName", "My Awesome Site");
+        /// // App-wide global (all websites)
         /// TemplateEngine.SetGlobalVariable("CurrentYear", DateTime.Now.Year);
         /// 
-        /// // Available in ALL templates without setting again
-        /// var engine1 = new TemplateEngine();
-        /// engine1.Render("{{SiteName}} - {{CurrentYear}}");  // Works!
-        /// 
-        /// var engine2 = new TemplateEngine();
-        /// engine2.Render("Copyright {{CurrentYear}}");  // Also works!
+        /// // Website-scoped global (only this website)
+        /// TemplateEngine.SetGlobalVariable("website", websiteViewModel, websiteId: 5);
+        /// TemplateEngine.SetGlobalVariable("owner", ownerViewModel, websiteId: 5);
         /// </example>
-        public static void SetGlobalVariable(string key, object value)
+        public static void SetGlobalVariable(string key, object value, int websiteId = 0)
         {
             if (string.IsNullOrEmpty(key))
                 throw new ArgumentNullException(nameof(key));
             
-            // Security: Block sensitive variable names
             if (SecurityConfig.Default.BlockedPropertyNames.Contains(key))
             {
                 throw new TemplateSecurityException(
                     $"Cannot set blocked global variable: {key}", "BlockedVariable");
             }
-            
-            _globalVariables[key] = value;
+
+            if (websiteId > 0)
+            {
+                var websiteVars = _websiteGlobals.GetOrAdd(websiteId,
+                    _ => new ConcurrentDictionary<string, object>(StringComparer.OrdinalIgnoreCase));
+                websiteVars[key] = value;
+            }
+            else
+            {
+                _globalVariables[key] = value;
+            }
+
+            // Increment version to invalidate all data-aware caches
+            System.Threading.Interlocked.Increment(ref _globalVariablesVersion);
         }
 
         /// <summary>
-        /// Sets multiple GLOBAL variables at once.
+        /// Sets multiple global variables at once.
+        /// Without websiteId: app-wide. With websiteId: website-scoped.
         /// </summary>
-        /// <param name="variables">Dictionary of variable names and values</param>
-        public static void SetGlobalVariables(IDictionary<string, object> variables)
+        public static void SetGlobalVariables(IDictionary<string, object> variables, int websiteId = 0)
         {
             if (variables == null)
                 throw new ArgumentNullException(nameof(variables));
             
             foreach (var kvp in variables)
             {
-                SetGlobalVariable(kvp.Key, kvp.Value);
+                SetGlobalVariable(kvp.Key, kvp.Value, websiteId);
             }
         }
 
         /// <summary>
         /// Gets a global variable value. Returns null if not found.
+        /// With websiteId: searches website-scoped globals first, then app-wide.
         /// </summary>
-        /// <param name="key">Variable name</param>
-        /// <returns>Variable value or null</returns>
-        public static object GetGlobalVariable(string key)
+        public static object GetGlobalVariable(string key, int websiteId = 0)
         {
+            if (websiteId > 0 && _websiteGlobals.TryGetValue(websiteId, out var websiteVars))
+            {
+                if (websiteVars.TryGetValue(key, out var wsValue))
+                    return wsValue;
+            }
             if (_globalVariables.TryGetValue(key, out var value))
                 return value;
             return null;
@@ -325,33 +469,55 @@ namespace ASTTemplateParser
         /// <summary>
         /// Checks if a global variable exists.
         /// </summary>
-        /// <param name="key">Variable name</param>
-        /// <returns>True if the global variable exists</returns>
-        public static bool HasGlobalVariable(string key)
+        public static bool HasGlobalVariable(string key, int websiteId = 0)
         {
+            if (websiteId > 0 && _websiteGlobals.TryGetValue(websiteId, out var websiteVars))
+            {
+                if (websiteVars.ContainsKey(key)) return true;
+            }
             return _globalVariables.ContainsKey(key);
         }
 
         /// <summary>
         /// Removes a specific global variable.
         /// </summary>
-        /// <param name="key">Variable name to remove</param>
-        /// <returns>True if the variable was removed</returns>
-        public static bool RemoveGlobalVariable(string key)
+        public static bool RemoveGlobalVariable(string key, int websiteId = 0)
         {
+            if (websiteId > 0 && _websiteGlobals.TryGetValue(websiteId, out var websiteVars))
+                return websiteVars.TryRemove(key, out _);
             return _globalVariables.TryRemove(key, out _);
         }
 
         /// <summary>
-        /// Clears ALL global variables.
+        /// Clears global variables.
+        /// Without websiteId: clears app-wide. With websiteId: clears that website's globals.
         /// </summary>
-        public static void ClearGlobalVariables()
+        public static void ClearGlobalVariables(int websiteId = 0)
         {
-            _globalVariables.Clear();
+            if (websiteId > 0)
+            {
+                if (_websiteGlobals.TryGetValue(websiteId, out var websiteVars))
+                    websiteVars.Clear();
+            }
+            else
+            {
+                _globalVariables.Clear();
+            }
         }
 
         /// <summary>
-        /// Gets the count of global variables currently set.
+        /// Gets the count of global variables.
+        /// Without websiteId: app-wide count. With websiteId: that website's count.
+        /// </summary>
+        public static int GetGlobalVariableCount(int websiteId = 0)
+        {
+            if (websiteId > 0 && _websiteGlobals.TryGetValue(websiteId, out var websiteVars))
+                return websiteVars.Count;
+            return _globalVariables.Count;
+        }
+
+        /// <summary>
+        /// Gets the count of app-wide global variables.
         /// </summary>
         public static int GlobalVariableCount => _globalVariables.Count;
 
@@ -362,7 +528,7 @@ namespace ASTTemplateParser
         public TemplateEngine ClearVariables()
         {
             _variables.Clear();
-            _variablesDirty = true; // Mark hash as stale
+            _variablesDirty = true;
             return this;
         }
 
@@ -380,6 +546,7 @@ namespace ASTTemplateParser
             public DateTime? ExpiresAt { get; set; }
             public string FilePath { get; set; }
             public DateTime FileLastModified { get; set; }
+            public long ComponentVersion { get; set; }
         }
 
         // Render output cache - shared across ALL engine instances
@@ -394,38 +561,49 @@ namespace ASTTemplateParser
         private string ComputeDataHash(IDictionary<string, object> additionalVariables)
         {
             // Fast path: if no variables changed and no additional variables, return cached hash
-            if (!_variablesDirty && additionalVariables == null && _lastDataHash != null)
+            // Now also checks global variables version
+            if (!_variablesDirty && 
+                _lastGlobalVariablesVersion == _globalVariablesVersion &&
+                additionalVariables == null && 
+                _lastDataHash != null)
             {
                 return _lastDataHash;
             }
 
             unchecked
             {
+                // Use XOR-based commutative hashing — order-independent, no sorting needed
+                // This eliminates LINQ .OrderBy() allocations (IOrderedEnumerable + buffer array)
                 int hash = 17;
                 
-                // Include global variables
-                foreach (var kvp in _globalVariables.OrderBy(x => x.Key))
+                // Include global variables (XOR is commutative — no ordering needed)
+                foreach (var kvp in _globalVariables)
                 {
-                    hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
-                    hash = hash * 31 + (kvp.Value?.GetHashCode() ?? 0);
+                    int entryHash = (kvp.Key?.GetHashCode() ?? 0) * 397 ^ GetContentAwareHashCode(kvp.Value);
+                    hash ^= entryHash;
                 }
                 
                 // Include instance variables
-                foreach (var kvp in _variables.OrderBy(x => x.Key))
+                foreach (var kvp in _variables)
                 {
-                    hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
-                    hash = hash * 31 + (kvp.Value?.GetHashCode() ?? 0);
+                    int entryHash = (kvp.Key?.GetHashCode() ?? 0) * 397 ^ GetContentAwareHashCode(kvp.Value);
+                    hash ^= entryHash;
                 }
                 
                 // Include additional variables
                 if (additionalVariables != null)
                 {
-                    foreach (var kvp in additionalVariables.OrderBy(x => x.Key))
+                    foreach (var kvp in additionalVariables)
                     {
-                        hash = hash * 31 + (kvp.Key?.GetHashCode() ?? 0);
-                        hash = hash * 31 + (kvp.Value?.GetHashCode() ?? 0);
+                        int entryHash = (kvp.Key?.GetHashCode() ?? 0) * 397 ^ GetContentAwareHashCode(kvp.Value);
+                        hash ^= entryHash;
                     }
                 }
+                
+                // Mix in counts to distinguish {A=1} from {A=1, B=1} when XOR cancels out
+                hash = hash * 31 + _globalVariables.Count;
+                hash = hash * 31 + _variables.Count;
+                hash = hash * 31 + (additionalVariables?.Count ?? 0);
                 
                 var result = hash.ToString("X8"); // 8-char hex string
                 
@@ -434,10 +612,42 @@ namespace ASTTemplateParser
                 {
                     _lastDataHash = result;
                     _variablesDirty = false;
+                    _lastGlobalVariablesVersion = _globalVariablesVersion;
                 }
                 
                 return result;
             }
+        }
+
+        /// <summary>
+        /// Computes a content-aware hash code for caching.
+        /// Unlike GetHashCode(), this properly hashes collection contents
+        /// instead of using reference-based identity.
+        /// </summary>
+        private static int GetContentAwareHashCode(object value)
+        {
+            if (value == null) return 0;
+            if (value is string || value is ValueType) return value.GetHashCode();
+            
+            if (value is IEnumerable enumerable)
+            {
+                unchecked
+                {
+                    int h = 17;
+                    int limit = 20; // Limit items hashed for performance
+                    foreach (var item in enumerable)
+                    {
+                        h = h * 31 + (item?.GetHashCode() ?? 0);
+                        if (--limit <= 0) break;
+                    }
+                    // Include count if available for better differentiation
+                    if (value is ICollection col)
+                        h = h * 31 + col.Count;
+                    return h;
+                }
+            }
+            
+            return value.GetHashCode();
         }
 
         /// <summary>
@@ -475,32 +685,25 @@ namespace ASTTemplateParser
                 effectiveCacheKey = $"{cacheKey}_{dataHash}";
             }
 
-            // Resolve the full file path - try both directories
-            string resolvedPath = null;
-            
-            // Try pages directory first
-            if (!string.IsNullOrEmpty(_pagesDirectory))
-            {
-                var pagesPath = Path.Combine(_pagesDirectory, filePath);
-                resolvedPath = ResolveTemplatePath(pagesPath);
-            }
-            
-            // If not found, try components directory
-            if (string.IsNullOrEmpty(resolvedPath) && !string.IsNullOrEmpty(_componentsDirectory))
-            {
-                var componentsPath = Path.Combine(_componentsDirectory, filePath);
-                resolvedPath = ResolveTemplatePath(componentsPath);
-            }
-            
-            // If still not found, throw error
+            // Resolve the full file path — try pages and local pages directories (priority-aware),
+            // then fall back to components directories.
+            string resolvedPath =
+                ResolveDualPath(filePath, _preferGlobalDirectory ? _pagesDirectory : _localPagesDirectory,
+                                          _preferGlobalDirectory ? _localPagesDirectory : _pagesDirectory)
+                ?? ResolveDualPath(filePath, _preferGlobalDirectory ? _componentsDirectory : _localComponentsDirectory,
+                                             _preferGlobalDirectory ? _localComponentsDirectory : _componentsDirectory);
+
+            // If still not found, throw a descriptive error
             if (string.IsNullOrEmpty(resolvedPath))
             {
-                if (string.IsNullOrEmpty(_pagesDirectory) && string.IsNullOrEmpty(_componentsDirectory))
+                var allDirs = new[] { _pagesDirectory, _localPagesDirectory, _componentsDirectory, _localComponentsDirectory }
+                    .Where(d => !string.IsNullOrEmpty(d));
+                if (!allDirs.Any())
                     throw new InvalidOperationException("No directory configured. Call SetPagesDirectory() or SetComponentsDirectory() first.");
-                throw new FileNotFoundException($"Template not found: {filePath}");
+                throw new FileNotFoundException($"Template not found: {filePath}. Searched in: {string.Join(", ", allDirs)}");
             }
 
-            // Check cache with file timestamp validation
+            // Check cache with file timestamp and path validation
             if (_renderCache.TryGetValue(effectiveCacheKey, out var cached))
             {
                 // Check if expired
@@ -508,16 +711,19 @@ namespace ASTTemplateParser
                 {
                     _renderCache.TryRemove(effectiveCacheKey, out _);
                 }
-                // Check if file was modified
+                // Check if file was modified OR if the resolved path changed (e.g., local override added)
                 else
                 {
                     var currentModified = File.GetLastWriteTimeUtc(resolvedPath);
-                    if (currentModified <= cached.FileLastModified)
+                    if (cached.FilePath == resolvedPath && 
+                        currentModified <= cached.FileLastModified && 
+                        cached.ComponentVersion == _componentVersion)
                     {
                         // Cache hit! Return cached output
                         return cached.RenderedOutput;
                     }
-                    // File changed - invalidate cache
+
+                    // File changed or path changed (e.g., local overrides global) - invalidate cache
                     _renderCache.TryRemove(effectiveCacheKey, out _);
                 }
             }
@@ -534,7 +740,8 @@ namespace ASTTemplateParser
                 CachedAt = DateTime.UtcNow,
                 ExpiresAt = expiration.HasValue ? DateTime.UtcNow.Add(expiration.Value) : (DateTime?)null,
                 FilePath = resolvedPath,
-                FileLastModified = File.GetLastWriteTimeUtc(resolvedPath)
+                FileLastModified = File.GetLastWriteTimeUtc(resolvedPath),
+                ComponentVersion = _componentVersion
             };
             _renderCache[effectiveCacheKey] = entry;
 
@@ -590,7 +797,8 @@ namespace ASTTemplateParser
                 CachedAt = DateTime.UtcNow,
                 ExpiresAt = expiration.HasValue ? DateTime.UtcNow.Add(expiration.Value) : (DateTime?)null,
                 FilePath = null,
-                FileLastModified = DateTime.MinValue
+                FileLastModified = DateTime.MinValue,
+                ComponentVersion = _componentVersion
             };
             _renderCache[effectiveCacheKey] = entry;
 
@@ -725,41 +933,46 @@ namespace ASTTemplateParser
             if (string.IsNullOrEmpty(template))
                 return string.Empty;
 
-            // Security: Check template size
+            // Security: Check template size (fast — just a length check)
             if (template.Length > _security.MaxTemplateSize)
             {
                 throw new TemplateLimitException("TemplateSize", 
                     _security.MaxTemplateSize, template.Length);
             }
 
-            // Security: Validate template structure for security issues
-            var validationResult = SecurityUtils.ValidateTemplate(template, _security);
-            if (!validationResult.IsValid)
-            {
-                throw new TemplateSecurityException(
-                    "Template failed security validation: " + string.Join("; ", validationResult.Errors),
-                    "TemplateValidation");
-            }
-
             // Enforce cache limits
             EnforceCacheLimits();
 
-            // Get or create AST
+            // Get or create AST — validation runs ONLY on cache miss (first parse)
+            // This eliminates 4 regex scans on every cache-hit Render() call
             var cacheKey = GetTemplateHash(template);
-            var cacheEntry = _astCache.GetOrAdd(cacheKey, _ => new CacheEntry<RootNode>
+            var securityConfig = _security; // capture for lambda
+            var cacheEntry = _astCache.GetOrAdd(cacheKey, _ =>
             {
-                Value = ParseTemplate(template),
-                CreatedAt = DateTime.UtcNow
+                // Security: Validate template structure ONCE on first parse
+                var validationResult = SecurityUtils.ValidateTemplate(template, securityConfig);
+                if (!validationResult.IsValid)
+                {
+                    throw new TemplateSecurityException(
+                        "Template failed security validation: " + string.Join("; ", validationResult.Errors),
+                        "TemplateValidation");
+                }
+
+                return new CacheEntry<RootNode>
+                {
+                    Value = ParseTemplate(template),
+                    CreatedAt = DateTime.UtcNow
+                };
             });
             
             cacheEntry.LastAccessed = DateTime.UtcNow;
 
             // Use layered variable lookup to avoid allocating a merged dictionary
-            // Priority: Additional (highest) → Instance → Global (lowest)
-            var evaluatorVars = new LayeredVariableLookup(_globalVariables, _variables, additionalVariables);
+            // Priority: Additional (highest) → Instance → WebsiteGlobals → AppGlobals (lowest)
+            var evaluatorVars = new LayeredVariableLookup(_globalVariables, _myWebsiteGlobals, _variables, additionalVariables);
 
             // Evaluate AST with layered variables (pass template size as hint for StringBuilder sizing)
-            var evaluator = new Evaluator(evaluatorVars.ToMergedDictionary(), _security, template.Length);
+            var evaluator = new Evaluator(evaluatorVars, _security, template.Length);
             
             // Setup component loader if components directory is configured
             if (!string.IsNullOrEmpty(_componentsDirectory))
@@ -785,93 +998,106 @@ namespace ASTTemplateParser
         }
         
         /// <summary>
-        /// Loads a component by path and returns its AST
-        /// Automatically invalidates cache if file has been modified
-        /// Supports both file-based (block/button.html) and folder-based (block/projects/default.html) components
+        /// Loads a component by path and returns its AST.
+        /// Supports dual-path resolution: checks local and global directories based on priority flag.
+        /// Automatically invalidates cache if file has been modified.
+        /// Supports both file-based (block/button.html) and folder-based (block/projects/default.html) components.
         /// </summary>
         private RootNode LoadComponent(string componentPath)
         {
-            if (string.IsNullOrEmpty(_componentsDirectory))
+            // Determine search order based on priority flag:
+            // preferGlobalDirectory=false (default): local dir first → global dir as fallback
+            // preferGlobalDirectory=true:            global dir first → local dir as fallback
+            string firstDir  = _preferGlobalDirectory ? _componentsDirectory      : _localComponentsDirectory;
+            string secondDir = _preferGlobalDirectory ? _localComponentsDirectory : _componentsDirectory;
+
+            if (string.IsNullOrEmpty(firstDir) && string.IsNullOrEmpty(secondDir))
                 return null;
-                
-            // Build full path
-            var fullPath = Path.Combine(_componentsDirectory, componentPath);
-            
-            // Try to find the component file
+
+            // Resolve file path — try first directory, then fallback to second
             string normalizedPath = null;
-            
-            // Option 1: Direct file path with .html extension provided
-            if (fullPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
-            {
-                normalizedPath = Path.GetFullPath(fullPath);
-                if (!File.Exists(normalizedPath))
-                    normalizedPath = null;
-            }
-            else
-            {
-                // Option 2: Add .html extension (e.g., block/button → block/button.html)
-                var withExtension = fullPath + ".html";
-                var normalizedWithExt = Path.GetFullPath(withExtension);
-                
-                if (File.Exists(normalizedWithExt))
-                {
-                    normalizedPath = normalizedWithExt;
-                }
-                else
-                {
-                    // Option 3: Folder with default.html (e.g., block/projects → block/projects/default.html)
-                    var folderPath = Path.GetFullPath(fullPath);
-                    if (Directory.Exists(folderPath))
-                    {
-                        var defaultPath = Path.Combine(folderPath, "default.html");
-                        if (File.Exists(defaultPath))
-                        {
-                            normalizedPath = defaultPath;
-                        }
-                    }
-                }
-            }
-            
-            // No component file found
+            if (!string.IsNullOrEmpty(firstDir))
+                normalizedPath = ResolveComponentFilePath(firstDir, componentPath);
+            if (normalizedPath == null && !string.IsNullOrEmpty(secondDir))
+                normalizedPath = ResolveComponentFilePath(secondDir, componentPath);
+
             if (string.IsNullOrEmpty(normalizedPath))
                 return null;
-                
-            // Security: Ensure path is within components directory
-            if (!normalizedPath.StartsWith(_componentsDirectory, StringComparison.OrdinalIgnoreCase))
+
+            // Security: Ensure resolved path is within one of the allowed component directories
+            bool isInAllowedDir =
+                (!string.IsNullOrEmpty(_componentsDirectory) &&
+                 normalizedPath.StartsWith(_componentsDirectory, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrEmpty(_localComponentsDirectory) &&
+                 normalizedPath.StartsWith(_localComponentsDirectory, StringComparison.OrdinalIgnoreCase));
+
+            if (!isInAllowedDir)
                 return null;
-            
+
             // Get file modification time for cache validation
             var lastWriteTime = File.GetLastWriteTimeUtc(normalizedPath);
             var cacheKey = "component:" + normalizedPath.ToLowerInvariant();
-            
-            // Check cache - validate against file modification time
+
+            // Check cache — invalidate if file was modified after cache was created
             if (_astCache.TryGetValue(cacheKey, out var cached))
             {
-                // If file was modified after cache was created, invalidate cache
                 if (cached.CreatedAt >= lastWriteTime)
                 {
                     cached.LastAccessed = DateTime.UtcNow;
                     return cached.Value;
                 }
-                
-                // File changed - remove from cache
+
+                // File changed — remove stale entry and bump component version
                 CacheEntry<RootNode> _;
                 _astCache.TryRemove(cacheKey, out _);
+                System.Threading.Interlocked.Increment(ref _componentVersion);
             }
-            
+
             // Load and parse (file is new or changed)
             var content = File.ReadAllText(normalizedPath);
             var ast = ParseTemplate(content);
-            
-            // Cache with current time
+
             _astCache[cacheKey] = new CacheEntry<RootNode>
             {
                 Value = ast,
                 CreatedAt = DateTime.UtcNow,
                 LastAccessed = DateTime.UtcNow
             };
-            
+
             return ast;
+        }
+
+        /// <summary>
+        /// Resolves a component file path within a base directory.
+        /// Tries: (1) exact .html path, (2) path + .html, (3) folder/default.html.
+        /// Returns the normalized absolute path if found, or null.
+        /// </summary>
+        private static string ResolveComponentFilePath(string baseDir, string componentPath)
+        {
+            var fullPath = Path.Combine(baseDir, componentPath);
+
+            // Option 1: Direct file path already has .html extension
+            if (fullPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+            {
+                var normalized = Path.GetFullPath(fullPath);
+                return File.Exists(normalized) ? normalized : null;
+            }
+
+            // Option 2: Add .html extension (e.g., block/button → block/button.html)
+            var withExt = Path.GetFullPath(fullPath + ".html");
+            if (File.Exists(withExt))
+                return withExt;
+
+            // Option 3: Folder with default.html (e.g., block/projects → block/projects/default.html)
+            var folderPath = Path.GetFullPath(fullPath);
+            if (Directory.Exists(folderPath))
+            {
+                var defaultPath = Path.Combine(folderPath, "default.html");
+                if (File.Exists(defaultPath))
+                    return defaultPath;
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -883,36 +1109,93 @@ namespace ASTTemplateParser
         /// <param name="isPage">If false (default), uses components directory. If true, uses pages directory.</param>
         public string RenderFile(string filePath, IDictionary<string, object> additionalVariables = null, bool isPage = false)
         {
-            // Build full path based on directory type
-            string baseDirectory;
+            string resolvedPath;
+
             if (isPage)
             {
-                if (string.IsNullOrEmpty(_pagesDirectory))
-                    throw new InvalidOperationException("Pages directory not configured. Call SetPagesDirectory() first.");
-                baseDirectory = _pagesDirectory;
+                // Try both page directories based on priority flag
+                resolvedPath = ResolveDualPath(filePath,
+                    _preferGlobalDirectory ? _pagesDirectory      : _localPagesDirectory,
+                    _preferGlobalDirectory ? _localPagesDirectory : _pagesDirectory);
+
+                if (string.IsNullOrEmpty(resolvedPath))
+                {
+                    var dirs = new[] { _pagesDirectory, _localPagesDirectory }
+                        .Where(d => !string.IsNullOrEmpty(d));
+                    if (!dirs.Any())
+                        throw new InvalidOperationException("Pages directory not configured. Call SetPagesDirectory() or SetLocalPagesDirectory() first.");
+                    throw new FileNotFoundException($"Page template not found: {filePath}. Searched in: {string.Join(", ", dirs)}");
+                }
             }
             else
             {
-                if (string.IsNullOrEmpty(_componentsDirectory))
-                    throw new InvalidOperationException("Components directory not configured. Call SetComponentsDirectory() first.");
-                baseDirectory = _componentsDirectory;
+                // Try both component directories based on priority flag
+                resolvedPath = ResolveDualPath(filePath,
+                    _preferGlobalDirectory ? _componentsDirectory      : _localComponentsDirectory,
+                    _preferGlobalDirectory ? _localComponentsDirectory : _componentsDirectory);
+
+                if (string.IsNullOrEmpty(resolvedPath))
+                {
+                    var dirs = new[] { _componentsDirectory, _localComponentsDirectory }
+                        .Where(d => !string.IsNullOrEmpty(d));
+                    if (!dirs.Any())
+                        throw new InvalidOperationException("Components directory not configured. Call SetComponentsDirectory() or SetLocalComponentsDirectory() first.");
+                    var baseDir = dirs.First();
+                    throw new FileNotFoundException($"Template not found: {filePath}. Searched in: {string.Join(", ", dirs)}");
+                }
             }
-            
-            var fullPath = Path.Combine(baseDirectory, filePath);
-            
-            // Resolve the actual file path (supports folder-based components)
-            string resolvedPath = ResolveTemplatePath(fullPath);
-            
-            if (string.IsNullOrEmpty(resolvedPath))
-            {
-                throw new FileNotFoundException($"Template not found: {filePath}. Searched in: {fullPath}.html, {fullPath}/default.html. Base: {baseDirectory}");
-            }
-            
+
             // Security: Validate path before loading
             ValidateFilePath(resolvedPath);
-            
+
             var template = LoadTemplate(resolvedPath);
             return Render(template, additionalVariables);
+        }
+
+        /// <summary>
+        /// Resolves a page path using local/global priority
+        /// </summary>
+        public string ResolvePagePath(string pageName)
+        {
+            if (string.IsNullOrEmpty(_pagesDirectory) && string.IsNullOrEmpty(_localPagesDirectory)) return null;
+            return ResolveDualPath(pageName, 
+                _preferGlobalDirectory ? _pagesDirectory : _localPagesDirectory,
+                _preferGlobalDirectory ? _localPagesDirectory : _pagesDirectory);
+        }
+
+        /// <summary>
+        /// Resolves a component path using local/global priority
+        /// </summary>
+        public string ResolveComponentPath(string componentName)
+        {
+            if (string.IsNullOrEmpty(_componentsDirectory) && string.IsNullOrEmpty(_localComponentsDirectory)) return null;
+            return ResolveDualPath(componentName, 
+                _preferGlobalDirectory ? _componentsDirectory : _localComponentsDirectory,
+                _preferGlobalDirectory ? _localComponentsDirectory : _componentsDirectory);
+        }
+
+        /// <summary>
+        /// Tries to resolve a template path from two directories in order.
+        /// Returns the resolved absolute path from the first directory that contains the file, or null.
+        /// </summary>
+        internal string ResolveDualPath(string filePath, string firstDir, string secondDir)
+        {
+            if (!filePath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+            {
+                filePath += ".html";
+            }
+
+            if (!string.IsNullOrEmpty(firstDir))
+            {
+                var path = ResolveTemplatePath(Path.Combine(firstDir, filePath));
+                if (path != null) return path;
+            }
+            if (!string.IsNullOrEmpty(secondDir))
+            {
+                var path = ResolveTemplatePath(Path.Combine(secondDir, filePath));
+                if (path != null) return path;
+            }
+            return null;
         }
         
         /// <summary>
@@ -922,7 +1205,12 @@ namespace ASTTemplateParser
         private string ResolveTemplatePath(string fullPath)
         {
             if (_pathCache.TryGetValue(fullPath, out var cachedPath))
-                return cachedPath;
+            {
+                if (File.Exists(cachedPath))
+                    return cachedPath;
+                // Cached path no longer exists (file moved/deleted) - remove stale entry
+                _pathCache.TryRemove(fullPath, out _);
+            }
 
             string resolvedPath = null;
 
@@ -932,6 +1220,20 @@ namespace ASTTemplateParser
                 var normalizedPath = Path.GetFullPath(fullPath);
                 if (File.Exists(normalizedPath))
                     resolvedPath = normalizedPath;
+
+                // Option 3 (when already .html): strip extension → check as folder/default.html
+                // e.g. "components\block\about.html" → check "components\block\about\" folder
+                if (resolvedPath == null)
+                {
+                    var pathWithoutExt = fullPath.Substring(0, fullPath.Length - 5); // remove ".html"
+                    var folderPath = Path.GetFullPath(pathWithoutExt);
+                    if (Directory.Exists(folderPath))
+                    {
+                        var defaultPath = Path.Combine(folderPath, "default.html");
+                        if (File.Exists(defaultPath))
+                            resolvedPath = defaultPath;
+                    }
+                }
             }
             
             if (resolvedPath == null)
@@ -996,8 +1298,11 @@ namespace ASTTemplateParser
             if (block == null)
                 throw new ArgumentNullException(nameof(block));
             
-            // Build component path
-            var componentPath = $"block/{block.ComponentPath}";
+            // Build component path.
+            // If ComponentPath already starts with "block/" avoid creating "block/block/..." double prefix.
+            var componentPath = block.ComponentPath.StartsWith("block/", StringComparison.OrdinalIgnoreCase)
+                ? block.ComponentPath
+                : $"block/{block.ComponentPath}";
             
             // Fire OnBeforeIncludeRender callback
             if (_onBeforeIncludeRender != null)
@@ -1008,6 +1313,7 @@ namespace ASTTemplateParser
                     OldName = block.Name,
                     ComponentPath = componentPath,
                     ComponentType = "block",
+                    JsonPath = null,
                     Parameters = new Dictionary<string, string>()
                 };
                 
@@ -1038,6 +1344,7 @@ namespace ASTTemplateParser
                     OldName = block.Name,
                     ComponentPath = componentPath,
                     ComponentType = "block",
+                    JsonPath = null,
                     Parameters = new Dictionary<string, string>()
                 };
                 
@@ -1171,29 +1478,9 @@ namespace ASTTemplateParser
             if (prepared?.Ast == null)
                 return string.Empty;
 
-            // Merge variables in order of priority: Global (lowest) → Instance → Additional (highest)
-            var evaluatorVars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-            
-            // 1. Add global variables first (lowest priority - can be overridden)
-            foreach (var kvp in _globalVariables)
-            {
-                evaluatorVars[kvp.Key] = kvp.Value;
-            }
-            
-            // 2. Add instance variables (override global)
-            foreach (var kvp in _variables)
-            {
-                evaluatorVars[kvp.Key] = kvp.Value;
-            }
-            
-            // 3. Add additional variables (highest priority - override all)
-            if (additionalVariables != null)
-            {
-                foreach (var kvp in additionalVariables)
-                {
-                    evaluatorVars[kvp.Key] = kvp.Value;
-                }
-            }
+            // Use layered variable lookup — same priority as Render():
+            // Additional (highest) → Instance → WebsiteGlobals → AppGlobals (lowest)
+            var evaluatorVars = new LayeredVariableLookup(_globalVariables, _myWebsiteGlobals, _variables, additionalVariables);
 
             var evaluator = new Evaluator(evaluatorVars, _security);
             
@@ -1231,6 +1518,7 @@ namespace ASTTemplateParser
                         OldName = includeNode.OldName,
                         ComponentPath = includeNode.ComponentPath,
                         ComponentType = "include",
+                        JsonPath = includeNode.JsonPath,
                         Parameters = includeNode.Parameters
                             .ToDictionary(p => p.Name, p => p.Value)
                     });
@@ -1253,6 +1541,7 @@ namespace ASTTemplateParser
                             OldName = elementNode.OldName,
                             ComponentPath = $"element/{elementNode.ComponentPath}",
                             ComponentType = "element",
+                            JsonPath = elementNode.JsonPath,
                             Parameters = elementNode.Parameters
                                 .ToDictionary(p => p.Name, p => p.Value)
                         });
@@ -1280,6 +1569,7 @@ namespace ASTTemplateParser
                             OldName = dataNode.OldName,
                             ComponentPath = $"data/{dataNode.ComponentPath}",
                             ComponentType = "data",
+                            JsonPath = dataNode.JsonPath,
                             Parameters = dataNode.Parameters
                                 .ToDictionary(p => p.Name, p => p.Value)
                         });
@@ -1307,6 +1597,7 @@ namespace ASTTemplateParser
                             OldName = navNode.OldName,
                             ComponentPath = $"navigation/{navNode.ComponentPath}",
                             ComponentType = "navigation",
+                            JsonPath = navNode.JsonPath,
                             Parameters = navNode.Parameters
                                 .ToDictionary(p => p.Name, p => p.Value)
                         });
@@ -1334,6 +1625,7 @@ namespace ASTTemplateParser
                             OldName = blockNode.OldName,
                             ComponentPath = $"block/{blockNode.ComponentPath}",
                             ComponentType = "block",
+                            JsonPath = blockNode.JsonPath,
                             Parameters = blockNode.Parameters
                                 .ToDictionary(p => p.Name, p => p.Value)
                         });
@@ -1470,8 +1762,12 @@ namespace ASTTemplateParser
         {
             _astCache.Clear();
             _templateCache.Clear();
+            _renderCache.Clear();
+            _pathCache.Clear();
             PropertyAccessor.ClearCache();
             Evaluator.ClearExpressionCache();
+            BlockParser.ClearCache();
+            System.Threading.Interlocked.Increment(ref _componentVersion);
         }
 
         /// <summary>
@@ -1482,14 +1778,356 @@ namespace ASTTemplateParser
             return new CacheStatistics
             {
                 AstCacheCount = _astCache.Count,
-                TemplateCacheCount = _templateCache.Count
+                TemplateCacheCount = _templateCache.Count,
+                RenderCacheCount = _renderCache.Count,
+                PathCacheCount = _pathCache.Count
             };
+        }
+
+        /// <summary>
+        /// Pre-warms the component cache by loading and parsing ALL component files from the components directory.
+        /// Call this at app startup (e.g., Application_Start or Startup.Configure) to eliminate 
+        /// first-request file I/O latency. After calling this, ALL component renders are cache hits.
+        /// </summary>
+        /// <returns>Number of components pre-warmed</returns>
+        /// <example>
+        /// // In Application_Start or Startup
+        /// var engine = new TemplateEngine();
+        /// engine.SetComponentsDirectory("path/to/components");
+        /// int count = engine.PreWarmComponents();
+        /// Console.WriteLine($"Pre-warmed {count} component templates");
+        /// </example>
+        public int PreWarmComponents()
+        {
+            if (string.IsNullOrEmpty(_componentsDirectory) || !Directory.Exists(_componentsDirectory))
+                return 0;
+
+            int count = 0;
+            try
+            {
+                var htmlFiles = Directory.GetFiles(_componentsDirectory, "*.html", SearchOption.AllDirectories);
+                foreach (var file in htmlFiles)
+                {
+                    try
+                    {
+                        var normalizedPath = Path.GetFullPath(file);
+                        
+                        // Security: Ensure path is within components directory
+                        if (!normalizedPath.StartsWith(_componentsDirectory, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        // Load and cache the file content
+                        var lastWrite = File.GetLastWriteTimeUtc(normalizedPath);
+                        var content = File.ReadAllText(normalizedPath);
+                        
+                        if (content.Length > _security.MaxTemplateSize)
+                            continue;
+
+                        _templateCache[normalizedPath] = new TemplateCacheEntry
+                        {
+                            Content = content,
+                            LastModified = lastWrite
+                        };
+
+                        // Parse AST once — reuse for both content-hash key and component path key
+                        var cacheKey = GetTemplateHash(content);
+                        var astEntry = _astCache.GetOrAdd(cacheKey, _ => new CacheEntry<RootNode>
+                        {
+                            Value = ParseTemplate(content),
+                            CreatedAt = DateTime.UtcNow,
+                            LastAccessed = DateTime.UtcNow
+                        });
+
+                        // Reuse the already-parsed AST for the component path key (no second parse)
+                        var componentCacheKey = "component:" + normalizedPath.ToLowerInvariant();
+                        _astCache.GetOrAdd(componentCacheKey, _ => astEntry);
+
+                        // Cache the resolved path
+                        var relativePath = normalizedPath.Substring(_componentsDirectory.Length).TrimStart(Path.DirectorySeparatorChar);
+                        var fullPathKey = Path.Combine(_componentsDirectory, relativePath);
+                        _pathCache[fullPathKey] = normalizedPath;
+                        
+                        // Also cache without extension
+                        if (fullPathKey.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var withoutExt = fullPathKey.Substring(0, fullPathKey.Length - 5);
+                            _pathCache[withoutExt] = normalizedPath;
+                        }
+
+                        count++;
+                    }
+                    catch
+                    {
+                        // Skip files that fail to load/parse — don't break startup
+                    }
+                }
+            }
+            catch
+            {
+                // Directory read failed — non-fatal
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Pre-warms the pages cache by loading and parsing ALL page templates from the pages directory.
+        /// Call this at app startup to eliminate first-request latency for page templates.
+        /// </summary>
+        /// <returns>Number of pages pre-warmed</returns>
+        public int PreWarmPages()
+        {
+            if (string.IsNullOrEmpty(_pagesDirectory) || !Directory.Exists(_pagesDirectory))
+                return 0;
+
+            int count = 0;
+            try
+            {
+                var htmlFiles = Directory.GetFiles(_pagesDirectory, "*.html", SearchOption.AllDirectories);
+                foreach (var file in htmlFiles)
+                {
+                    try
+                    {
+                        var normalizedPath = Path.GetFullPath(file);
+                        var lastWrite = File.GetLastWriteTimeUtc(normalizedPath);
+                        var content = File.ReadAllText(normalizedPath);
+                        
+                        if (content.Length > _security.MaxTemplateSize)
+                            continue;
+
+                        _templateCache[normalizedPath] = new TemplateCacheEntry
+                        {
+                            Content = content,
+                            LastModified = lastWrite
+                        };
+
+                        var cacheKey = GetTemplateHash(content);
+                        _astCache.GetOrAdd(cacheKey, _ => new CacheEntry<RootNode>
+                        {
+                            Value = ParseTemplate(content),
+                            CreatedAt = DateTime.UtcNow,
+                            LastAccessed = DateTime.UtcNow
+                        });
+
+                        // Cache the resolved path
+                        _pathCache[normalizedPath] = normalizedPath;
+
+                        count++;
+                    }
+                    catch
+                    {
+                        // Skip files that fail to load/parse
+                    }
+                }
+            }
+            catch
+            {
+                // Directory read failed — non-fatal
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Pre-warms ALL caches (components + pages) at once.
+        /// Best called at application startup for zero-latency first requests.
+        /// </summary>
+        /// <returns>Total number of templates pre-warmed</returns>
+        /// <example>
+        /// // In Global.asax Application_Start or Startup.Configure
+        /// var engine = new TemplateEngine();
+        /// engine.SetComponentsDirectory("path/to/components");
+        /// engine.SetPagesDirectory("path/to/pages");
+        /// int total = engine.PreWarmAll();
+        /// Console.WriteLine($"Pre-warmed {total} templates — ready for zero-latency serving!");
+        /// </example>
+        public int PreWarmAll()
+        {
+            return PreWarmComponents() + PreWarmPages();
+        }
+
+        /// <summary>
+        /// Pre-warms ALL themes at application startup for multi-tenant CMS.
+        /// Scans each theme's subdirectories for .html files and caches them.
+        /// Duplicate themes are automatically skipped (static cache is shared).
+        /// Call this ONCE after WebsiteManager.Load() completes.
+        /// </summary>
+        /// <param name="themePaths">List of theme base directory paths</param>
+        /// <param name="subFolders">Which subdirectories to cache. Default: components, pages.
+        /// Example: new[] { "components", "pages", "layouts" }</param>
+        /// <returns>Total number of templates pre-warmed across all themes</returns>
+        /// <example>
+        /// // Default: components + pages
+        /// TemplateEngine.PreWarmThemes(themePaths);
+        /// 
+        /// // Custom: components + pages + layouts
+        /// TemplateEngine.PreWarmThemes(themePaths, "components", "pages", "layouts");
+        /// </example>
+        public static int PreWarmThemes(IEnumerable<string> themePaths, params string[] subFolders)
+        {
+            if (themePaths == null) return 0;
+
+            // Default folders if none specified
+            if (subFolders == null || subFolders.Length == 0)
+                subFolders = new[] { "components", "pages" };
+
+            int total = 0;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var themePath in themePaths)
+            {
+                if (string.IsNullOrEmpty(themePath) || !seen.Add(themePath))
+                    continue;
+
+                foreach (var folder in subFolders)
+                {
+                    if (string.IsNullOrEmpty(folder)) continue;
+
+                    var dirPath = Path.Combine(themePath, folder);
+                    if (Directory.Exists(dirPath))
+                    {
+                        total += PreWarmDirectory(dirPath);
+                    }
+                }
+            }
+
+            return total;
+        }
+
+        /// <summary>
+        /// Pre-warms a single directory by loading and parsing all .html files into the static cache.
+        /// Useful for custom directories that aren't components or pages.
+        /// </summary>
+        /// <param name="directoryPath">Absolute path to the directory containing .html files</param>
+        /// <returns>Number of templates pre-warmed</returns>
+        public static int PreWarmDirectory(string directoryPath)
+        {
+            if (string.IsNullOrEmpty(directoryPath) || !Directory.Exists(directoryPath))
+                return 0;
+
+            int count = 0;
+            try
+            {
+                var htmlFiles = Directory.GetFiles(directoryPath, "*.html", SearchOption.AllDirectories);
+                foreach (var file in htmlFiles)
+                {
+                    try
+                    {
+                        var normalizedPath = Path.GetFullPath(file);
+                        var lastWrite = File.GetLastWriteTimeUtc(normalizedPath);
+                        var content = File.ReadAllText(normalizedPath);
+
+                        _templateCache[normalizedPath] = new TemplateCacheEntry
+                        {
+                            Content = content,
+                            LastModified = lastWrite
+                        };
+
+                        var cacheKey = GetTemplateHash(content);
+                        _astCache.GetOrAdd(cacheKey, _ => new CacheEntry<RootNode>
+                        {
+                            Value = ParseTemplate(content),
+                            CreatedAt = DateTime.UtcNow,
+                            LastAccessed = DateTime.UtcNow
+                        });
+
+                        _pathCache[normalizedPath] = normalizedPath;
+                        count++;
+                    }
+                    catch
+                    {
+                        // Skip files that fail — don't break startup
+                    }
+                }
+            }
+            catch
+            {
+                // Directory read failed — non-fatal
+            }
+
+            return count;
         }
 
         private class TemplateCacheEntry
         {
             public string Content { get; set; }
             public DateTime LastModified { get; set; }
+        }
+
+
+        /// <summary>
+        /// Reads all text from a file. Checks both local and global directories if configured.
+        /// Use this to fetch external data (JSON, TXT, HTML) for your templates.
+        /// Results are cached for high performance and invalidated when the file changes.
+        /// </summary>
+        /// <param name="relativePath">Path relative to base directory (e.g., "data/settings.json")</param>
+        /// <returns>File content or an empty string if not found</returns>
+        public string ReadFile(string relativePath)
+        {
+            if (string.IsNullOrEmpty(relativePath)) return string.Empty;
+
+            string fullPath = null;
+
+            // 1. Try to resolve path directly from configured directories (supporting any extension)
+            var searchDirs = new List<string>();
+            if (_preferGlobalDirectory)
+            {
+                if (!string.IsNullOrEmpty(_componentsDirectory)) searchDirs.Add(_componentsDirectory);
+                if (!string.IsNullOrEmpty(_localComponentsDirectory)) searchDirs.Add(_localComponentsDirectory);
+                if (!string.IsNullOrEmpty(_pagesDirectory)) searchDirs.Add(_pagesDirectory);
+                if (!string.IsNullOrEmpty(_localPagesDirectory)) searchDirs.Add(_localPagesDirectory);
+            }
+            else
+            {
+                if (!string.IsNullOrEmpty(_localComponentsDirectory)) searchDirs.Add(_localComponentsDirectory);
+                if (!string.IsNullOrEmpty(_componentsDirectory)) searchDirs.Add(_componentsDirectory);
+                if (!string.IsNullOrEmpty(_localPagesDirectory)) searchDirs.Add(_localPagesDirectory);
+                if (!string.IsNullOrEmpty(_pagesDirectory)) searchDirs.Add(_pagesDirectory);
+            }
+
+            foreach (var baseDir in searchDirs)
+            {
+                try {
+                    var combined = Path.Combine(baseDir, relativePath);
+                    var normalized = Path.GetFullPath(combined);
+                    if (File.Exists(normalized))
+                    {
+                        fullPath = normalized;
+                        break;
+                    }
+                } catch { }
+            }
+
+            if (fullPath == null || !File.Exists(fullPath))
+                return string.Empty;
+
+            var cacheKey = fullPath.ToLowerInvariant();
+            var lastWriteTime = File.GetLastWriteTimeUtc(fullPath);
+
+            // 2. Check cache with file modification validation
+            if (_fileCache.TryGetValue(cacheKey, out var cached))
+            {
+                if (cached.CreatedAt >= lastWriteTime)
+                {
+                    cached.LastAccessed = DateTime.UtcNow;
+                    return cached.Value;
+                }
+
+                // File changed - remove from cache
+                CacheEntry<string> _;
+                _fileCache.TryRemove(cacheKey, out _);
+            }
+
+            // 3. Load and store in cache
+            var content = File.ReadAllText(fullPath);
+            _fileCache[cacheKey] = new CacheEntry<string>
+            {
+                Value = content,
+                CreatedAt = DateTime.UtcNow,
+                LastAccessed = DateTime.UtcNow
+            };
+
+            return content;
         }
 
         private class CacheEntry<T>
@@ -1507,6 +2145,8 @@ namespace ASTTemplateParser
     {
         public int AstCacheCount { get; set; }
         public int TemplateCacheCount { get; set; }
+        public int RenderCacheCount { get; set; }
+        public int PathCacheCount { get; set; }
     }
 
     /// <summary>
@@ -1529,6 +2169,11 @@ namespace ASTTemplateParser
         /// Path to the component file
         /// </summary>
         public string ComponentPath { get; set; }
+        
+        /// <summary>
+        /// JSON path for component data binding
+        /// </summary>
+        public string JsonPath { get; set; }
         
         /// <summary>
         /// Type of component: "element", "block", "data", "navigation", or "include"
@@ -1564,58 +2209,104 @@ namespace ASTTemplateParser
         internal RootNode Ast { get; set; }
     }
     /// <summary>
-    /// High-performance layered variable lookup that avoids creating a merged dictionary
-    /// for every Render() call. Queries layers in priority order:
-    /// Additional (highest) → Instance → Global (lowest)
+    /// High-performance layered variable lookup that avoids creating a merged dictionary.
+    /// Implements IVariableContext for zero-allocation rendering.
+    /// Priority: Additional (highest) → Instance → WebsiteGlobals → AppGlobals (lowest)
     /// </summary>
-    internal class LayeredVariableLookup
+    internal class LayeredVariableLookup : IVariableContext
     {
-        private readonly ConcurrentDictionary<string, object> _globals;
+        private readonly ConcurrentDictionary<string, object> _appGlobals;
+        private readonly ConcurrentDictionary<string, object> _websiteGlobals;
         private readonly Dictionary<string, object> _instance;
         private readonly IDictionary<string, object> _additional;
 
         public LayeredVariableLookup(
-            ConcurrentDictionary<string, object> globals,
+            ConcurrentDictionary<string, object> appGlobals,
+            ConcurrentDictionary<string, object> websiteGlobals,
             Dictionary<string, object> instance,
             IDictionary<string, object> additional)
         {
-            _globals = globals;
+            _appGlobals = appGlobals;
+            _websiteGlobals = websiteGlobals;
             _instance = instance;
             _additional = additional;
         }
 
-        /// <summary>
-        /// Creates a merged dictionary with correct priority.
-        /// Pre-allocates capacity to avoid dictionary resizing.
-        /// </summary>
-        public Dictionary<string, object> ToMergedDictionary()
+        public bool TryGetValue(string key, out object value)
         {
-            // Estimate total capacity to avoid dictionary resizes
-            int estimatedCapacity = _globals.Count + _instance.Count + (_additional?.Count ?? 0);
+            // 1. Additional (highest priority)
+            if (_additional != null && _additional.TryGetValue(key, out value))
+                return true;
+
+            // 2. Instance variables
+            if (_instance != null && _instance.TryGetValue(key, out value))
+                return true;
+
+            // 3. Website-scoped globals
+            if (_websiteGlobals != null && _websiteGlobals.TryGetValue(key, out value))
+                return true;
+
+            // 4. App-level globals (lowest)
+            if (_appGlobals != null && _appGlobals.TryGetValue(key, out value))
+                return true;
+
+            value = null;
+            return false;
+        }
+
+        public object this[string key] => TryGetValue(key, out var value) ? value : null;
+
+        public bool ContainsKey(string key)
+        {
+            return (_additional != null && _additional.ContainsKey(key)) ||
+                   (_instance != null && _instance.ContainsKey(key)) ||
+                   (_websiteGlobals != null && _websiteGlobals.ContainsKey(key)) ||
+                   (_appGlobals != null && _appGlobals.ContainsKey(key));
+        }
+
+        public IVariableContext CreateChild(IDictionary<string, object> localVariables = null)
+        {
+            return new HierarchicalVariableContext(this, localVariables);
+        }
+
+        public Dictionary<string, object> ToDictionary()
+        {
+            int estimatedCapacity = (_appGlobals?.Count ?? 0) + (_websiteGlobals?.Count ?? 0) + (_instance?.Count ?? 0) + (_additional?.Count ?? 0);
             var merged = new Dictionary<string, object>(estimatedCapacity, StringComparer.OrdinalIgnoreCase);
 
-            // 1. Global (lowest priority)
-            foreach (var kvp in _globals)
-            {
-                merged[kvp.Key] = kvp.Value;
-            }
-
-            // 2. Instance (overrides global)
-            foreach (var kvp in _instance)
-            {
-                merged[kvp.Key] = kvp.Value;
-            }
-
-            // 3. Additional (highest priority, overrides all)
-            if (_additional != null)
-            {
-                foreach (var kvp in _additional)
-                {
-                    merged[kvp.Key] = kvp.Value;
-                }
-            }
+            if (_appGlobals != null) foreach (var kvp in _appGlobals) merged[kvp.Key] = kvp.Value;
+            if (_websiteGlobals != null) foreach (var kvp in _websiteGlobals) merged[kvp.Key] = kvp.Value;
+            if (_instance != null) foreach (var kvp in _instance) merged[kvp.Key] = kvp.Value;
+            if (_additional != null) foreach (var kvp in _additional) merged[kvp.Key] = kvp.Value;
 
             return merged;
         }
+
+        public IEnumerator<KeyValuePair<string, object>> GetEnumerator()
+        {
+            var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            
+            if (_additional != null)
+            {
+                foreach (var kvp in _additional) { seenKeys.Add(kvp.Key); yield return kvp; }
+            }
+            
+            if (_instance != null)
+            {
+                foreach (var kvp in _instance) { if (seenKeys.Add(kvp.Key)) yield return kvp; }
+            }
+            
+            if (_websiteGlobals != null)
+            {
+                foreach (var kvp in _websiteGlobals) { if (seenKeys.Add(kvp.Key)) yield return kvp; }
+            }
+            
+            if (_appGlobals != null)
+            {
+                foreach (var kvp in _appGlobals) { if (seenKeys.Add(kvp.Key)) yield return kvp; }
+            }
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 }

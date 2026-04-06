@@ -53,13 +53,46 @@ A **blazing-fast**, **security-hardened** template engine for .NET with HTML-lik
 - ⚡ **Compiled Regex** - Pre-compiled `RegexOptions.Compiled` for ~3-5x faster parsing
 - 🔒 **Path Traversal Protection** - `ValidatePath()` prevents directory escape attacks
 
-### Loop Metadata & Dynamic Attributes (NEW in v2.1.0)
+### JsonPath Support (NEW in v2.2.1 - April 4, 2026)
+- 🗂️ **JsonPath Property** — `IncludeInfo` now exposes a `JsonPath` property, extracted from the `jsonpath="..."` attribute on component tags.
+- 🔗 **Full Pipeline Support** — Available in `PrepareTemplate()`, `ExtractIncludeNames()`, `OnBeforeIncludeRender`, and `OnAfterIncludeRender` callbacks.
+- 🧩 **All Component Types** — Works on `<Include>`, `<Element>`, `<Data>`, `<Nav>`, and `<Block>` tags.
+
+### Loop Metadata & Dynamic Attributes (v2.1.0)
 - 🔢 **Loop Metadata** - Use `{{loop.index}}`, `{{loop.count}}`, and `{{loop.first}}` inside `ForEach`
 - 🏷️ **Attr Filter** - Render dynamic attributes only if value exists: `{{ myClass | attr:"class" }}`
 - 🧹 **Auto Attribute Cleanup** - Enable `RemoveEmptyAttributes` in `SecurityConfig` to auto-strip empty attributes
 - 🛠️ **Error-Tolerant Parsing** - `BlockParser` now preserves invalid block tags as HTML instead of removing them
 - 🚀 **Zero-Allocation Metadata** - Optimized metadata dictionary reuse for maximum loop performance
 - 🛡️ **Component Validation** - Blocks `../` and `:` in component paths
+
+### BlockParser Dual-Path Support (NEW in v2.1.5 - March 28, 2026)
+- 🧩 **Dual-Path Parsing** — `BlockParser` now uses the same local/global resolution logic as the engine (local pages override).
+- 📄 **Auto .html Extension** — Engine now automatically appends `.html` in `ResolveDualPath` for cleaner calls.
+- 🛠️ **Public Path Helpers** — `ResolvePagePath(name)` and `ResolveComponentPath(name)` exposed to TemplateEngine for manual path resolution.
+- 🛡️ **Validation Overhaul** — `BlockParser` now validates paths against BOTH local and global allowed directories.
+
+### Dual-Path Directory Support (NEW in v2.1.4 - March 28, 2026)
+- 📁 **Local Components Path** — `SetLocalComponentsDirectory()` sets a per-engine local override or fallback for components
+- 📄 **Local Pages Path** — `SetLocalPagesDirectory()` sets a per-engine local override or fallback for pages
+- 🔀 **Priority Control** — `SetDirectoryPriority(preferGlobal)`: `false` (default) = local first; `true` = global first
+- 🛡️ **Security Aware** — Both paths auto-registered in `AllowedTemplatePaths` for safe file access
+- 🔄 **Consistent Resolution** — `LoadComponent()`, `RenderFile()`, and `RenderCachedFile()` all honour the same dual-path logic
+
+### Performance & Security Hardening (v2.1.3 - March 11, 2026)
+- 🚀 **Zero-Allocation ForEach** — Optimized context swap eliminates object allocations in loops.
+- ⚡ **Ultra-Fast Expressions** — Skip character scans for simple variable lookups (~2-3x faster).
+- 🛡️ **Auto-PreWarming** — `PreWarmThemes()` and `PreWarmAll()` to pre-cache templates at startup.
+- 🔒 **HTML Auto-Encoding** — Default XSS prevention for all `{{ variable }}` outputs.
+- 🧮 **Fast Path Resolution** — Zero-allocation resolution for nested paths (e.g., `item.Name`).
+
+### Caching & Stability Fixes (NEW in v2.1.2)
+- 🔧 **Complete Cache Clear** — `ClearCaches()` now clears ALL caches (render, path, block, expression, property)
+- 📂 **Path Cache Validation** — Stale cached paths auto-removed when files are moved or deleted
+- 🔄 **Component Change Detection** — `RenderCachedFile` auto-detects component file changes via version tracking
+- 🧮 **Content-Aware Hashing** — `ComputeDataHash` properly hashes List/Dictionary contents (not references)
+- ⚡ **Race Condition Fix** — Expression cache eviction is now thread-safe under high concurrency
+- 🚀 **ForEach Optimization** — Loop metadata dictionary allocated once and reused across iterations
 
 ---
 
@@ -247,9 +280,14 @@ Console.WriteLine($"Segment cache: {BlockParser.SegmentCacheCount}");
 </Element>
 
 <!-- Auto-resolves to components/block/hero.html -->
-<Block component="hero">
+<Block component="hero" jsonpath="$.pageData.hero">
     <Param name="title" value="{{PageTitle}}" />
 </Block>
+
+<!-- JsonPath available in IncludeInfo -->
+<Data component="products" name="prod_list" jsonpath="$.api.products">
+    <Param name="limit" value="10" />
+</Data>
 ```
 
 ---
@@ -298,16 +336,31 @@ var engine = new TemplateEngine(security);
 
 ---
 
-## 🌐 Global Variables
+## 🌐 Global Variables (App-Wide or Website-Scoped)
+
+Global variables are **static variables that persist across ALL TemplateEngine instances**. Set them once at application startup, and they're available in every template.
+
+### 🏢 Website-Scoped Globals (NEW!)
+You can now scope global variables to a specific `websiteId`. This is perfect for multi-tenant applications.
 
 ```csharp
-// Set once at startup
-TemplateEngine.SetGlobalVariable("SiteName", "My Website");
-TemplateEngine.SetGlobalVariable("Year", DateTime.Now.Year);
+// App-wide global (All websites)
+TemplateEngine.SetGlobalVariable("SiteName", "My Main Site");
 
-// Available in ALL templates automatically!
-// No need to call SetVariable() every time
+// Website-scoped global (Only for website ID 5)
+TemplateEngine.SetGlobalVariable("ThemeColor", "Blue", websiteId: 5);
+TemplateEngine.SetGlobalVariable("Banner", "sale.png", websiteId: 5);
+
+// To use website globals, set the ID on your engine instance
+var engine = new TemplateEngine();
+engine.SetWebsiteId(5); 
+
+// Will use "My Main Site" AND include "ThemeColor" / "Banner"
+string html = engine.RenderCachedFile("home.html", "home", includeDataHash: true);
 ```
+
+### ⚡ Auto Cache Invalidation
+Whenever you call `SetGlobalVariable()`, the engine automatically increments a global version counter. Any **Data-Aware Cache** (using `includeDataHash: true`) will detect this change and re-render on the next call to ensure your pages always show the latest global data.
 
 ---
 
@@ -341,6 +394,41 @@ TemplateEngine.SetGlobalVariable("Year", DateTime.Now.Year);
 | `HasCachedRender(key)` | Check cache exists |
 | `RenderCacheCount` | Get cache count |
 | `GetRenderCacheStats()` | Get detailed stats |
+
+### Directory Methods (NEW in v2.1.4 / v2.1.5)
+| Method | Description |
+|--------|-------------|
+| `SetComponentsDirectory(path)` | Global components directory |
+| `SetPagesDirectory(path)` | Global pages directory |
+| `SetLocalComponentsDirectory(path)` | ⭐ **NEW** - Local/override components directory |
+| `SetLocalPagesDirectory(path)` | ⭐ **NEW** - Local/override pages directory |
+| `SetDirectoryPriority(preferGlobal)` | ⭐ **NEW** - `false` (default) = local first; `true` = global first |
+| `ResolvePagePath(name)` | ⭐ **NEW** - Resolve page path using dual-path priority |
+| `ResolveComponentPath(name)` | ⭐ **NEW** - Resolve component path using dual-path priority |
+
+---
+
+## 📁 Dual-Path Directory (NEW in v2.1.4)
+
+### Local override (default — local takes priority)
+```csharp
+// Global/theme path for the website
+_engine.SetComponentsDirectory(website.GetComponentPath());
+_engine.SetPagesDirectory(website.BasePageTemplatePath());
+
+// Local path overrides global (checked first by default)
+_engine.SetLocalComponentsDirectory(localThemePath);
+_engine.SetLocalPagesDirectory(localPagePath);
+
+// Now: localThemePath checked first → falls back to website path if not found
+string html = _engine.RenderCachedFile("home", "home", includeDataHash: true);
+```
+
+### Global priority (global first, local as fallback)
+```csharp
+_engine.SetDirectoryPriority(preferGlobal: true);
+// Now: website path checked first → localThemePath used only as fallback
+```
 
 ---
 

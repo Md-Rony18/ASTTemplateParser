@@ -33,15 +33,12 @@ namespace ASTTemplateParser
             // 1. Support IDictionary (Dictionaries, ExpandoObject, etc.)
             if (target is IDictionary dict)
             {
+                // Note: We use the dictionary's own lookup mechanism for performance.
+                // For case-insensitivity, the input dictionary should be created with 
+                // StringComparer.OrdinalIgnoreCase.
                 if (dict.Contains(memberName))
                     return dict[memberName];
                 
-                // Also try case-insensitive for dictionary keys if it's a string key dictionary
-                foreach (var key in dict.Keys)
-                {
-                    if (key is string s && string.Equals(s, memberName, StringComparison.OrdinalIgnoreCase))
-                        return dict[key];
-                }
                 return null;
             }
 

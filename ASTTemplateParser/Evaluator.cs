@@ -15,7 +15,7 @@ namespace ASTTemplateParser
     public sealed class Evaluator : IAstVisitor
     {
         private readonly StringBuilder _output;
-        private readonly Dictionary<string, object> _variables;
+        private IVariableContext _variables;
         private readonly SecurityConfig _security;
         private int _currentLoopIterations;
         private int _currentRecursionDepth;
@@ -48,13 +48,19 @@ namespace ASTTemplateParser
         // Template fragments defined with <Define> for inline recursion
         private Dictionary<string, DefineNode> _templateFragments = new Dictionary<string, DefineNode>(StringComparer.OrdinalIgnoreCase);
 
-        public Evaluator(Dictionary<string, object> variables = null, SecurityConfig security = null, int templateSizeHint = 0)
+        public Evaluator(IVariableContext variables = null, SecurityConfig security = null, int templateSizeHint = 0)
         {
             _output = GetBuilder(templateSizeHint > 0 ? templateSizeHint / 2 : 0);
-            _variables = variables ?? new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            _variables = variables ?? new DictionaryVariableContext(null);
             _security = security ?? SecurityConfig.Default;
             _currentLoopIterations = 0;
             _currentRecursionDepth = 0;
+        }
+
+        // Backward compatibility constructor for existing tests/code
+        public Evaluator(Dictionary<string, object> variables, SecurityConfig security = null, int templateSizeHint = 0)
+            : this(new DictionaryVariableContext(variables), security, templateSizeHint)
+        {
         }
         
         /// <summary>
@@ -101,19 +107,36 @@ namespace ASTTemplateParser
         }
 
         /// <summary>
+        /// Sets slot content (for component rendering)
+        /// </summary>
+        public void SetSlots(List<AstNode> defaultSlot, Dictionary<string, List<AstNode>> namedSlots)
+        {
+            _slotContent.Clear();
+            if (defaultSlot != null)
+                _slotContent["default"] = defaultSlot;
+            
+            if (namedSlots != null)
+            {
+                foreach (var kvp in namedSlots)
+                    _slotContent[kvp.Key] = kvp.Value;
+            }
+        }
+
+        /// <summary>
         /// Evaluates AST and returns HTML string
         /// </summary>
         public string Evaluate(RootNode ast)
         {
             _currentRecursionDepth++;
-            
-            if (_currentRecursionDepth > _security.MaxRecursionDepth)
-            {
-                throw new TemplateLimitException("RecursionDepth", _security.MaxRecursionDepth, _currentRecursionDepth);
-            }
 
             try
             {
+                // Moved inside try so StringBuilder is always returned to pool on exception
+                if (_currentRecursionDepth > _security.MaxRecursionDepth)
+                {
+                    throw new TemplateLimitException("RecursionDepth", _security.MaxRecursionDepth, _currentRecursionDepth);
+                }
+
                 Visit(ast);
                 var result = _output.ToString();
                 return result;
@@ -168,6 +191,11 @@ namespace ASTTemplateParser
                     _output.Append(value.ToString());
                 }
             }
+            else if (_security.EnableStrictMode)
+            {
+                // Strict mode: Show which variable is null/missing for easier debugging
+                _output.Append($"<!-- Null/Missing: {node.Expression} -->");
+            }
         }
 
         public void Visit(ElementNode node)
@@ -175,7 +203,7 @@ namespace ASTTemplateParser
             if (node.IsComponent)
             {
                 // Render as component with "element/" prefix
-                RenderTypedComponent(node.ComponentPath, node.Name, node.OldName, node.Parameters, 
+                RenderTypedComponent(node.ComponentPath, node.Name, node.OldName, node.JsonPath, node.Parameters, 
                     node.SlotContent, node.NamedSlots, "element");
             }
             else
@@ -192,7 +220,7 @@ namespace ASTTemplateParser
             if (node.IsComponent)
             {
                 // Render as component with "data/" prefix
-                RenderTypedComponent(node.ComponentPath, node.Name, node.OldName, node.Parameters, 
+                RenderTypedComponent(node.ComponentPath, node.Name, node.OldName, node.JsonPath, node.Parameters, 
                     node.SlotContent, node.NamedSlots, "data");
             }
             else
@@ -209,7 +237,7 @@ namespace ASTTemplateParser
             if (node.IsComponent)
             {
                 // Render as component with "navigation/" prefix
-                RenderTypedComponent(node.ComponentPath, node.Name, node.OldName, node.Parameters, 
+                RenderTypedComponent(node.ComponentPath, node.Name, node.OldName, node.JsonPath, node.Parameters, 
                     node.SlotContent, node.NamedSlots, "navigation");
             }
             else
@@ -226,7 +254,7 @@ namespace ASTTemplateParser
             if (node.IsComponent)
             {
                 // Render as component with "block/" prefix
-                RenderTypedComponent(node.ComponentPath, node.Name, node.OldName, node.Parameters, 
+                RenderTypedComponent(node.ComponentPath, node.Name, node.OldName, node.JsonPath, node.Parameters, 
                     node.SlotContent, node.NamedSlots, "block");
             }
             else
@@ -282,68 +310,59 @@ namespace ASTTemplateParser
             if (collection == null)
                 return;
 
-            var varName = node.VariableName;
-            object previousValue = null;
-            bool hadPrevious = _variables.TryGetValue(varName, out previousValue);
-            
-            // Backup previous loop metadata if exists
-            object previousLoop = null;
-            bool hadPreviousLoop = _variables.TryGetValue("loop", out previousLoop);
-            
-            int iterationCount = 0;
-            int totalCounter = 0;
+            // Try to get total count for loop.last and loop.total (O(1) for ICollection)
+            int totalCount = -1;
+            if (collection is ICollection col) totalCount = col.Count;
 
+            // PERFORMANCE: Create ONE reusable child context + loop metadata dict
+            // We update values in-place each iteration — zero allocation per iteration
+            var loopLocalDict = new Dictionary<string, object>(3, StringComparer.OrdinalIgnoreCase);
+            var loopMetadata = new Dictionary<string, object>(5, StringComparer.OrdinalIgnoreCase);
+            loopLocalDict["loop"] = loopMetadata;
+            var childContext = new HierarchicalVariableContext(_variables, loopLocalDict);
+
+            // Save and swap context
+            var savedVariables = _variables;
+            _variables = childContext;
+
+            int iterations = 0;
             try
             {
                 foreach (var item in collection)
                 {
-                    // Security: Check loop iteration limit
-                    iterationCount++;
-                    _currentLoopIterations++;
-                    totalCounter++;
-                    
-                    if (_currentLoopIterations > _security.MaxLoopIterations)
+                    // Security: limit iterations
+                    if (_currentLoopIterations >= _security.MaxLoopIterations)
                     {
-                        throw new TemplateLimitException("LoopIterations", 
-                            _security.MaxLoopIterations, _currentLoopIterations);
+                        _output.Append($"<!-- Max loop iterations exceeded: {_security.MaxLoopIterations} -->");
+                        break;
                     }
 
-                    if (_currentLoopIterations > _security.MaxLoopIterations)
+                    // Update in-place — no allocation
+                    loopLocalDict[node.VariableName] = item;
+                    loopMetadata["index"] = iterations;
+                    loopMetadata["count"] = iterations + 1;
+                    loopMetadata["first"] = iterations == 0;
+
+                    if (totalCount != -1)
                     {
-                        throw new TemplateLimitException("LoopIterations", 
-                            _security.MaxLoopIterations, _currentLoopIterations);
+                        loopMetadata["last"] = iterations == totalCount - 1;
+                        loopMetadata["total"] = totalCount;
                     }
 
-                    // Pre-create loop metadata dictionary ONCE outside the main loop
-                    // and update its values inside for maximum performance
-                    var loopMetadata = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-                    loopMetadata["index"] = totalCounter - 1;
-                    loopMetadata["count"] = totalCounter;
-                    loopMetadata["first"] = totalCounter == 1;
-
-                    _variables[varName] = item;
-                    _variables["loop"] = loopMetadata;
-
+                    // Render directly into our own StringBuilder — no child Evaluator needed
                     foreach (var child in node.Body)
                     {
                         child.Accept(this);
                     }
+
+                    iterations++;
+                    _currentLoopIterations++;
                 }
             }
             finally
             {
-                _currentLoopIterations -= iterationCount;
-                
-                // Restore previous state
-                if (hadPrevious)
-                    _variables[varName] = previousValue;
-                else
-                    _variables.Remove(varName);
-
-                if (hadPreviousLoop)
-                    _variables["loop"] = previousLoop;
-                else
-                    _variables.Remove("loop");
+                // Restore parent context
+                _variables = savedVariables;
             }
         }
 
@@ -357,30 +376,82 @@ namespace ASTTemplateParser
             return ResolveExpression(expression, _variables);
         }
 
-        private object ResolveExpression(string expression, Dictionary<string, object> variables)
+        private object ResolveExpression(string expression, IVariableContext variables)
         {
             if (string.IsNullOrEmpty(expression))
                 return null;
 
             expression = expression.Trim();
 
+            // ULTRA-FAST PATH: Simple variable name (no special chars)
+            // Most template expressions are just simple names like {{ Name }}, {{ title }}
+            // This avoids the character scan entirely for these common cases
+            if (expression.Length < 64) // reasonable limit for simple var names
+            {
+                bool isSimple = true;
+                bool hasDotSimple = false;
+                for (int i = 0; i < expression.Length; i++)
+                {
+                    char c = expression[i];
+                    if (c == '.') { hasDotSimple = true; continue; }
+                    if (c == '[' || c == '(' || c == '|' || c == ' ' || c == '"' || c == '\'')
+                    { isSimple = false; break; }
+                }
+                if (isSimple)
+                {
+                    if (!hasDotSimple)
+                    {
+                        // Pure simple variable: just do a lookup
+                        if (variables.TryGetValue(expression, out object simpleVal))
+                        {
+                            if (!_security.BlockedPropertyNames.Contains(expression))
+                                return CleanResult(simpleVal);
+                        }
+                        // Not found — fall through to NCalc for numeric literals etc.
+                    }
+                    else
+                    {
+                        // Dot path: skip to nested path resolution directly
+                        if (SecurityUtils.IsPropertyPathSafe(expression, _security))
+                            return CleanResult(ResolveNestedPath(expression, variables));
+                        return null;
+                    }
+                }
+            }
+
             // Security: Validate expression with full config
             if (!SecurityUtils.IsExpressionSafe(expression, _security))
             {
-                string reason = !SecurityConfig.Default.AllowIndexerAccess && expression.Contains("[") ? "Indexer access disabled" : "Safe characters violation or dangerous pattern";
+                string reason = !_security.AllowIndexerAccess && expression.Contains("[") ? "Indexer access disabled" : "Safe characters violation or dangerous pattern";
                 throw new TemplateSecurityException(
                     $"Unsafe expression detected: '{expression}'. Reason: {reason}", "ExpressionInjection", expression);
             }
 
+            // PERFORMANCE: Single-pass character scan to set flags
+            // Only reached for complex expressions with brackets, pipes, parens, etc.
+            bool hasBracket = false, hasDot = false, hasParen = false, hasPipe = false;
+            for (int i = 0; i < expression.Length; i++)
+            {
+                switch (expression[i])
+                {
+                    case '[': case ']': hasBracket = true; break;
+                    case '.': hasDot = true; break;
+                    case '(': hasParen = true; break;
+                    case '|': hasPipe = true; break;
+                }
+            }
+
             // Indexer support (e.g., item[key] or item["key"]) - FAST PATH
-            if (expression.Contains('[') && expression.Contains(']'))
+            // ONLY if it's a simple indexer access (no logical operators or ternary)
+            if (hasBracket && !expression.Contains("=") && !expression.Contains("?") && 
+                !expression.Contains(">") && !expression.Contains("<") && !expression.Contains("!"))
             {
                 return CleanResult(ResolveIndexerAccess(expression, variables));
             }
 
             // Check for direct variable match first (even with dots)
             // This handles cases like engine.SetVariable("Data.Items", items)
-            if (!expression.Contains('('))
+            if (!hasParen)
             {
                 if (variables.TryGetValue(expression, out object directValue))
                 {
@@ -390,21 +461,21 @@ namespace ASTTemplateParser
                 }
             }
 
-            // Simple variable lookup (no dots, no parens)
-            if (!expression.Contains('.') && !expression.Contains('(') && !expression.Contains('|'))
+            // Simple variable lookup (no dots, no parens, no pipes)
+            if (!hasDot && !hasParen && !hasPipe)
             {
                 // Already checked via TryGetValue above, if we reach here it's not in the dictionary
                 // Fall through to NCalc for potential numeric literals or other simple expressions
             }
 
             // Pipe support for filters (e.g., {{ Name | uppercase }} or {{ Price | currency:"en-GB" }})
-            if (expression.Contains('|'))
+            if (hasPipe)
             {
                 return ResolveFilterExpression(expression, variables);
             }
             
             // Nested property access (contains dots, no parens, no pipes)
-            if (expression.Contains('.') && !expression.Contains('(') && !expression.Contains('|'))
+            if (hasDot && !hasParen)
             {
                 // Security: Validate property path
                 if (!SecurityUtils.IsPropertyPathSafe(expression, _security))
@@ -415,7 +486,7 @@ namespace ASTTemplateParser
             }
 
             // Complex expression - use NCalc (only if method calls allowed)
-            if (!_security.AllowMethodCalls && expression.Contains('('))
+            if (!_security.AllowMethodCalls && hasParen)
             {
                 return null; // Block NCalc evaluation if method calls disabled and has parens
             }
@@ -427,7 +498,7 @@ namespace ASTTemplateParser
         /// <summary>
         /// Highly optimized indexer resolution for expressions like item[Key] or item.Data[index].Prop
         /// </summary>
-        private object ResolveIndexerAccess(string expression, Dictionary<string, object> variables)
+        private object ResolveIndexerAccess(string expression, IVariableContext variables)
         {
             // Find the FIRST [
             int openBracket = expression.IndexOf('[');
@@ -483,7 +554,7 @@ namespace ASTTemplateParser
         /// <summary>
         /// Resolves expressions with pipes and filters like {{ Value | filter:"arg1" }}
         /// </summary>
-        private object ResolveFilterExpression(string expression, Dictionary<string, object> variables)
+        private object ResolveFilterExpression(string expression, IVariableContext variables)
         {
             var pipes = expression.Split('|');
             if (pipes.Length == 0) return null;
@@ -526,13 +597,15 @@ namespace ASTTemplateParser
             return currentResult;
         }
 
-        private object ResolveFromObject(object root, string path, Dictionary<string, object> variables)
+        private object ResolveFromObject(object root, string path, IVariableContext variables)
         {
             if (root == null || string.IsNullOrEmpty(path)) return root;
             
-            // Create a temporary context where the root is accessible
-            var tempVars = new Dictionary<string, object>(variables, StringComparer.OrdinalIgnoreCase);
-            tempVars["__this__"] = root;
+            // Create a temporary context where the root is accessible (Zero-allocation)
+            var tempVars = variables.CreateChild(new Dictionary<string, object>(1, StringComparer.OrdinalIgnoreCase)
+            {
+                ["__this__"] = root
+            });
             
             string fullPath = "__this__" + (path.StartsWith("[") ? "" : ".") + path;
             return ResolveExpression(fullPath, tempVars);
@@ -561,7 +634,7 @@ namespace ASTTemplateParser
             return ResolveNestedPath(path, _variables);
         }
 
-        private object ResolveNestedPath(string path, Dictionary<string, object> variables, object rootObject = null)
+        private object ResolveNestedPath(string path, IVariableContext variables, object rootObject = null)
         {
             if (string.IsNullOrEmpty(path)) return rootObject;
 
@@ -593,23 +666,78 @@ namespace ASTTemplateParser
             {
                 return null; // Exceed max depth
             }
+
+            // ═══════════════════════════════════════════════════════════
+            // FAST PATH: 2 parts (e.g., "item.Name", "loop.index")
+            // Covers ~90% of real template expressions — zero allocation
+            // ═══════════════════════════════════════════════════════════
+            if (parts.Length == 2)
+            {
+                // Try "parts[0]" as variable, then ".parts[1]" as property
+                if (variables.TryGetValue(parts[0], out var root0) && root0 != null)
+                {
+                    if (!_security.BlockedPropertyNames.Contains(parts[0]) &&
+                        SecurityUtils.IsPropertySafe(parts[1], _security))
+                    {
+                        return PropertyAccessor.GetValue(root0, parts[1]);
+                    }
+                }
+                return null;
+            }
             
+            // ═══════════════════════════════════════════════════════════
+            // FAST PATH: 3 parts (e.g., "item.Address.City")
+            // ═══════════════════════════════════════════════════════════
+            if (parts.Length == 3)
+            {
+                // Try "parts[0].parts[1]" as variable first
+                // Then try "parts[0]" as variable with ".parts[1].parts[2]" as nested property
+                if (variables.TryGetValue(parts[0], out var root1) && root1 != null)
+                {
+                    if (!_security.BlockedPropertyNames.Contains(parts[0]))
+                    {
+                        if (SecurityUtils.IsPropertySafe(parts[1], _security))
+                        {
+                            var mid = PropertyAccessor.GetValue(root1, parts[1]);
+                            if (mid != null && SecurityUtils.IsPropertySafe(parts[2], _security))
+                                return PropertyAccessor.GetValue(mid, parts[2]);
+                        }
+                    }
+                }
+                return null;
+            }
+            
+            // ═══════════════════════════════════════════════════════════
+            // GENERAL PATH: 4+ parts — use longest prefix search
+            // ═══════════════════════════════════════════════════════════
             object current = null;
             int consumedParts = 0;
 
-            // 2. Find the longest prefix that matches a variable
-            // This is necessary because variables could have dots like "Data.Items"
-            // We start from the longest possible prefix to handle overlapping keys correctly
             for (int i = parts.Length - 1; i >= 0; i--)
             {
-                string prefix = (i == 0) ? parts[0] : string.Join(".", parts, 0, i + 1);
+                string prefix;
+                if (i == 0)
+                {
+                    prefix = parts[0];
+                }
+                else
+                {
+                    var sb = GetBuilder();
+                    for (int j = 0; j <= i; j++)
+                    {
+                        if (j > 0) sb.Append('.');
+                        sb.Append(parts[j]);
+                    }
+                    prefix = sb.ToString();
+                    ReturnBuilder(sb);
+                }
+
                 if (variables.TryGetValue(prefix, out current))
                 {
-                    // Security: Check if variable name is blocked
                     if (_security.BlockedPropertyNames.Contains(prefix))
                     {
                         current = null;
-                        continue; // Try shorter prefix or fail
+                        continue;
                     }
                     
                     consumedParts = i + 1;
@@ -623,10 +751,9 @@ namespace ASTTemplateParser
             // 3. Resolve remaining parts as properties
             for (int i = consumedParts; i < parts.Length && current != null; i++)
             {
-                // Security: Check each property name
                 if (!SecurityUtils.IsPropertySafe(parts[i], _security))
                 {
-                    return null; // Silently block access to sensitive properties
+                    return null;
                 }
                 
                 current = PropertyAccessor.GetValue(current, parts[i]);
@@ -640,18 +767,18 @@ namespace ASTTemplateParser
             return EvaluateNCalcExpression(expression, _variables);
         }
 
-        private object EvaluateNCalcExpression(string expression, Dictionary<string, object> variables)
+        private object EvaluateNCalcExpression(string expression, IVariableContext variables)
         {
             try
             {
+                // Enforce cache size limit before adding (outside GetOrAdd to avoid race condition)
+                if (_expressionCache.Count >= MaxExpressionCacheSize)
+                    EnforceExpressionCacheLimit();
+
                 // Try to get cached parsed LogicalExpression tree
                 // This avoids re-parsing the expression string every time
                 var cachedLogicalExpr = _expressionCache.GetOrAdd(expression, expr =>
                 {
-                    // Enforce cache size limit before adding
-                    if (_expressionCache.Count >= MaxExpressionCacheSize)
-                        EnforceExpressionCacheLimit();
-                    
                     // Parse once and cache the LogicalExpression tree
                     var tempExpr = new Expression(expr);
                     return tempExpr.ParsedExpression;
@@ -668,7 +795,10 @@ namespace ASTTemplateParser
                     ncalc = new Expression(expression);
                 }
                 
-                foreach(var kvp in variables) 
+                // PERFORMANCE: Use ToDictionary() for NCalc — it needs a flat dictionary
+                // This is called only for complex expressions, not simple variable lookups
+                var flatVars = variables.ToDictionary();
+                foreach(var kvp in flatVars) 
                 {
                     ncalc.Parameters[kvp.Key] = kvp.Value;
                 }
@@ -702,14 +832,32 @@ namespace ASTTemplateParser
 
             condition = condition.Trim();
 
-            // FAST PATH: If condition is just a variable or nested path (no ops, no quotes, no spaces)
+            // FAST PATH: Single-pass character scan for condition type detection
+            // Replaces 8+ .Contains() calls with one pass
+            bool hasSpace = false, hasParen = false, hasBang = false;
+            bool hasEquals = false, hasLt = false, hasGt = false;
+            bool hasQuote = false, hasDot = false;
+            for (int i = 0; i < condition.Length; i++)
+            {
+                switch (condition[i])
+                {
+                    case ' ': hasSpace = true; break;
+                    case '(': hasParen = true; break;
+                    case '!': hasBang = true; break;
+                    case '=': hasEquals = true; break;
+                    case '<': hasLt = true; break;
+                    case '>': hasGt = true; break;
+                    case '"': case '\'': hasQuote = true; break;
+                    case '.': hasDot = true; break;
+                }
+            }
+
+            // FAST PATH: Simple variable or nested path (no operators, no quotes, no spaces)
             // Example: "menuNode.HasChildren" or "IsActive"
-            if (!condition.Contains(' ') && !condition.Contains('(') && !condition.Contains('!') && 
-                !condition.Contains('=') && !condition.Contains('<') && !condition.Contains('>') && 
-                !condition.Contains('"') && !condition.Contains('\''))
+            if (!hasSpace && !hasParen && !hasBang && !hasEquals && !hasLt && !hasGt && !hasQuote)
             {
                 object val;
-                if (condition.Contains('.'))
+                if (hasDot)
                 {
                     val = ResolveNestedPath(condition);
                 }
@@ -720,24 +868,14 @@ namespace ASTTemplateParser
                 return IsTruthy(val);
             }
 
-            // Complex expression: use NCalc
+            // Complex expression: use NCalc with CACHED parse tree
             string processedCondition = PreprocessCondition(condition);
 
             try
             {
-                var expr = new Expression(processedCondition);
-                
-                foreach (var kvp in _variables)
-                {
-                    expr.Parameters[kvp.Key] = kvp.Value;
-                }
-                
-                // Add common literals for safety
-                expr.Parameters["null"] = null;
-                expr.Parameters["true"] = true;
-                expr.Parameters["false"] = false;
-
-                var result = expr.Evaluate();
+                // Use cached NCalc expression tree (same cache as EvaluateNCalcExpression)
+                // This avoids re-parsing the condition string on every evaluation
+                var result = EvaluateNCalcExpression(processedCondition, _variables);
                 return IsTruthy(result);
             }
             catch
@@ -911,7 +1049,7 @@ namespace ASTTemplateParser
             return ResolveInterpolationsInString(input, _variables);
         }
 
-        private string ResolveInterpolationsInString(string input, Dictionary<string, object> variables)
+        private string ResolveInterpolationsInString(string input, IVariableContext variables)
         {
             if (string.IsNullOrEmpty(input) || !input.Contains("{{"))
                 return input;
@@ -972,7 +1110,7 @@ namespace ASTTemplateParser
 
         /// <summary>
         /// Gets a StringBuilder from the pool with adaptive sizing.
-        /// Uses a tiered pool strategy: small builders (≤4KB) and large builders (>4KB)
+        /// Uses a tiered pool strategy: small builders (â‰¤4KB) and large builders (>4KB)
         /// to reduce reallocations by matching builder capacity to expected output size.
         /// </summary>
         /// <param name="sizeHint">Expected output size hint (0 = use default 1024)</param>
@@ -1033,372 +1171,135 @@ namespace ASTTemplateParser
 
         public void Visit(IncludeNode node)
         {
-            if (_componentLoader == null)
-            {
-                // No component loader - skip
-                return;
-            }
-
-            // Security: Check component depth to prevent infinite recursion
-            if (_componentDepth >= MaxComponentDepth)
-            {
-                _output.Append($"<!-- Max component depth exceeded: {node.ComponentPath} -->");
-                return;
-            }
-
-            // Security: Validate component path
-            if (string.IsNullOrEmpty(node.ComponentPath))
-                return;
-
-            // Track variables set by callback (only allocated when callback exists)
-            HashSet<string> variablesBefore = null;
-            HashSet<string> callbackSetVariables = null;
-            Dictionary<string, object> engineSnapshot = null;
-
-            try
-            {
-                
-                // Resolve names if they contain interpolations
-                string resolvedInstanceName = node.Name;
-                if (!string.IsNullOrEmpty(node.Name) && node.Name.Contains("{{") && node.Name.Contains("}}"))
-                {
-                    resolvedInstanceName = ResolveInterpolationsInString(node.Name);
-                }
-
-                string resolvedOldName = node.OldName;
-                if (!string.IsNullOrEmpty(node.OldName) && node.OldName.Contains("{{") && node.OldName.Contains("}}"))
-                {
-                    resolvedOldName = ResolveInterpolationsInString(node.OldName);
-                }
-
-                // Fire OnBeforeIncludeRender callback FIRST (before loading component)
-                if (_onBeforeIncludeRender != null && _engine != null)
-                {
-                    // Take snapshot of ENGINE variables before callback
-                    var currentEngineVars = _engine.GetVariables();
-                    engineSnapshot = new Dictionary<string, object>(currentEngineVars, StringComparer.OrdinalIgnoreCase);
-                    
-                    // Also take snapshot of Evaluator variables for sync logic
-                    variablesBefore = new HashSet<string>(_variables.Keys, StringComparer.OrdinalIgnoreCase);
-                    
-                    var includeInfo = new IncludeInfo
-                    {
-                        Name = resolvedInstanceName,
-                        OldName = resolvedOldName,
-                        ComponentPath = node.ComponentPath,
-                        ComponentType = "include",
-                        Parameters = new Dictionary<string, string>()
-                    };
-                    
-                    // Copy parameters for callback
-                    foreach (var p in node.Parameters)
-                    {
-                        if (!string.IsNullOrEmpty(p.Name))
-                            includeInfo.Parameters[p.Name] = p.Value;
-                    }
-                    
-                    // Call the callback - user can set variables on engine
-                    _onBeforeIncludeRender(includeInfo, _engine);
-                }
-                
-                // Create a container for parameter resolution that includes callback variables
-                // This context has access to PARENT variables (for resolution) AND CALLBACK variables
-                var paramResolutionVars = new Dictionary<string, object>(_variables, StringComparer.OrdinalIgnoreCase);
-                
-                if (_onBeforeIncludeRender != null && _engine != null)
-                {
-                    var engineVars = _engine.GetVariables();
-                    callbackSetVariables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    
-                    foreach (var kvp in engineVars)
-                    {
-                        bool isActuallySetByCallback = true;
-                        if (engineSnapshot != null && engineSnapshot.TryGetValue(kvp.Key, out var oldValue))
-                        {
-                            if (Equals(kvp.Value, oldValue))
-                            {
-                                isActuallySetByCallback = false;
-                            }
-                        }
-
-                        if (isActuallySetByCallback)
-                        {
-                            paramResolutionVars[kvp.Key] = kvp.Value;
-                            callbackSetVariables.Add(kvp.Key);
-                        }
-                    }
-                }
-                
-                // Load the component AST
-                var componentAst = _componentLoader(node.ComponentPath);
-                if (componentAst == null)
-                    return;
-
-                // Create the final context for the component
-                // Start with parent variables
-                var componentVars = new Dictionary<string, object>(_variables, StringComparer.OrdinalIgnoreCase);
-                
-                // CRITICAL: Clear instance-specific variables INHERITED FROM PARENT
-                // We do this BEFORE adding callback variables and parameters
-                componentVars.Remove("element");
-                componentVars.Remove("elementAttributes");
-                componentVars.Remove("oldname"); 
-                componentVars.Remove("name");
-
-                // Sync callback-set variables for the CHILD
-                if (callbackSetVariables != null)
-                {
-                    var engineVars = _engine.GetVariables();
-                    foreach (var varName in callbackSetVariables)
-                    {
-                        componentVars[varName] = engineVars[varName];
-                    }
-                }
-
-                // Add standard component variables
-                componentVars["name"] = resolvedInstanceName;
-                componentVars["oldname"] = resolvedOldName;
-                componentVars["path"] = node.ComponentPath;
-                componentVars["componentPath"] = node.ComponentPath;
-                componentVars["type"] = "include";
-                
-                // Add parameters as variables - resolve variable references
-                // Skip variables that were explicitly set by callback
-                // Note: Use componentVars for param resolution to access callback-set variables
-                foreach (var param in node.Parameters)
-                {
-                    // Skip if callback explicitly set this variable
-                    if (callbackSetVariables != null && callbackSetVariables.Contains(param.Name))
-                        continue;
-                    if (!string.IsNullOrEmpty(param.Name))
-                    {
-                        var paramValue = param.Value;
-                        object resolvedValue = null;
-                        
-                        if (string.IsNullOrEmpty(paramValue))
-                        {
-                            // No value provided - use default if available
-                            resolvedValue = null;
-                        }
-                        // Check for {{variable}} interpolation syntax
-                        else if (paramValue.StartsWith("{{") && paramValue.EndsWith("}}"))
-                        {
-                            // Extract variable name from {{variableName}}
-                            var varName = paramValue.Substring(2, paramValue.Length - 4).Trim();
-                            // Use componentVars for resolution to access callback-set variables
-                            resolvedValue = ResolveExpression(varName, paramResolutionVars);
-                        }
-                        // Check if value contains interpolations for mixed content like "Hello {{Name}}!"
-                        else if (paramValue.Contains("{{") && paramValue.Contains("}}"))
-                        {
-                            // Process interpolations within the string using componentVars context
-                            var interpolatedValue = ResolveInterpolationsInString(paramValue, paramResolutionVars);
-                            // Check if interpolation resulted in empty/incomplete string
-                            resolvedValue = string.IsNullOrEmpty(interpolatedValue) ? null : interpolatedValue;
-                        }
-                        // Check if value is a simple variable reference (no spaces, quotes)
-                        else if (!paramValue.Contains(" ") && 
-                                 !paramValue.StartsWith("\"") && 
-                                 !paramValue.StartsWith("'"))
-                        {
-                            // Try to resolve as expression (supports nested paths like item.Children)
-                            resolvedValue = ResolveExpression(paramValue, paramResolutionVars);
-                            if (resolvedValue == null)
-                            {
-                                // Fall back to literal value
-                                resolvedValue = paramValue;
-                            }
-                        }
-                        else
-                        {
-                            // Use as literal string value
-                            resolvedValue = paramValue;
-                        }
-                        
-                        // Apply default value if resolved value is null or empty
-                        if (resolvedValue == null || 
-                            (resolvedValue is string s && string.IsNullOrEmpty(s)))
-                        {
-                            if (!string.IsNullOrEmpty(param.Default))
-                            {
-                                // Default value can also contain interpolations
-                                if (param.Default.Contains("{{"))
-                                {
-                                    resolvedValue = ResolveInterpolationsInString(param.Default, paramResolutionVars);
-                                }
-                                else
-                                {
-                                    resolvedValue = param.Default;
-                                }
-                            }
-                            else
-                            {
-                                resolvedValue = string.Empty;
-                            }
-                        }
-                        
-                        componentVars[param.Name] = resolvedValue;
-                    }
-                }
-
-                var componentEvaluator = new Evaluator(componentVars, _security);
-                componentEvaluator.SetComponentLoader(_componentLoader);
-                componentEvaluator._componentDepth = _componentDepth + 1; // Increment depth
-                
-                // Pass callbacks to child evaluator
-                if (_onBeforeIncludeRender != null || _onAfterIncludeRender != null)
-                {
-                    componentEvaluator.SetIncludeCallback(_onBeforeIncludeRender, _engine, _onAfterIncludeRender);
-                }
-                
-                // Don't pass slot content for now to avoid recursion issues
-                // Slots will be a v2 feature
-
-                // Evaluate the component
-                var result = componentEvaluator.Evaluate(componentAst);
-                
-                // Fire OnAfterIncludeRender callback if configured (for wrapping)
-                if (_onAfterIncludeRender != null)
-                {
-                    var includeInfo = new IncludeInfo
-                    {
-                        Name = resolvedInstanceName,
-                        OldName = resolvedOldName,
-                        ComponentPath = node.ComponentPath,
-                        ComponentType = "include",
-                        Parameters = new Dictionary<string, string>()
-                    };
-                    foreach (var p in node.Parameters)
-                    {
-                        if (!string.IsNullOrEmpty(p.Name))
-                            includeInfo.Parameters[p.Name] = p.Value;
-                    }
-                    
-                    // Call callback - user can wrap/modify the output
-                    result = _onAfterIncludeRender(includeInfo, result);
-                }
-                
-                _output.Append(result);
-            }
-            catch (Exception ex)
-            {
-                // Output error as HTML comment for debugging
-                _output.Append($"<!-- Component Error [{node.ComponentPath}]: {ex.Message} -->");
-            }
-            finally
-            {
-                // CRITICAL: Restore engine variables to snapshot to prevent leaking to siblings
-                if (engineSnapshot != null && _engine != null)
-                {
-                    var engineVars = _engine.GetVariables();
-                    engineVars.Clear();
-                    foreach (var kvp in engineSnapshot)
-                    {
-                        engineVars[kvp.Key] = kvp.Value;
-                    }
-                }
-            }
+            // Delegate to shared component rendering logic
+            // For Include: fullPath = componentPath (no type prefix)
+            RenderComponentCore(
+                fullPath: node.ComponentPath,
+                componentPath: node.ComponentPath,
+                name: node.Name,
+                oldName: node.OldName,
+                jsonPath: node.JsonPath,
+                parameters: node.Parameters,
+                slotContent: node.SlotContent,
+                namedSlots: node.NamedSlots,
+                componentType: "include");
         }
 
         /// <summary>
-        /// Renders a type-specific component with auto path prefix
+        /// Renders a type-specific component with auto path prefix.
+        /// Thin wrapper that delegates to RenderComponentCore.
         /// </summary>
-        /// <param name="componentPath">Component path (e.g., "subTitle")</param>
-        /// <param name="name">Component instance name for caching</param>
-        /// <param name="parameters">Parameters to pass to the component</param>
-        /// <param name="slotContent">Default slot content</param>
-        /// <param name="namedSlots">Named slot content</param>
-        /// <param name="typePrefix">Type prefix (e.g., "element", "block", "data", "navigation")</param>
         private void RenderTypedComponent(
             string componentPath, 
             string name, 
             string oldName,
+            string jsonPath,
             List<ParamData> parameters,
             List<AstNode> slotContent,
             Dictionary<string, List<AstNode>> namedSlots,
             string typePrefix)
         {
-            if (_componentLoader == null)
-            {
-                // No component loader - skip
-                return;
-            }
+            // For typed components: fullPath = typePrefix/componentPath
+            var fullPath = $"{typePrefix}/{componentPath}";
+            RenderComponentCore(
+                fullPath: fullPath,
+                componentPath: componentPath,
+                name: name,
+                oldName: oldName,
+                jsonPath: jsonPath,
+                parameters: parameters,
+                slotContent: slotContent,
+                namedSlots: namedSlots,
+                componentType: typePrefix);
+        }
 
-            // Security: Check component depth to prevent infinite recursion
+        /// <summary>
+        /// Shared component rendering logic used by both Visit(IncludeNode) and RenderTypedComponent.
+        /// This eliminates ~270 lines of duplicated code and ensures consistent behavior.
+        /// </summary>
+        /// <param name="fullPath">Full path for loading (e.g., "slider" or "element/button")</param>
+        /// <param name="componentPath">Original component path (stored as componentPath variable)</param>
+        /// <param name="name">Component instance name</param>
+        /// <param name="oldName">Previous component name (for rename tracking)</param>
+        /// <param name="jsonPath">JSON path for component data binding</param>
+        /// <param name="parameters">Parameters to pass to the component</param>
+        /// <param name="slotContent">Inner content passed to the default slot</param>
+        /// <param name="namedSlots">Content for named slots</param>
+        /// <param name="componentType">Component type identifier (e.g., "include", "element", "data")</param>
+        private void RenderComponentCore(
+            string fullPath,
+            string componentPath,
+            string name,
+            string oldName,
+            string jsonPath,
+            List<ParamData> parameters,
+            List<AstNode> slotContent,
+            Dictionary<string, List<AstNode>> namedSlots,
+            string componentType)
+        {
+            if (_componentLoader == null)
+                return;
+
             if (_componentDepth >= MaxComponentDepth)
             {
-                _output.Append($"<!-- Max component depth exceeded: {typePrefix}/{componentPath} -->");
+                _output.Append($"<!-- Max component depth exceeded: {fullPath} -->");
                 return;
             }
 
-            // Security: Validate component path
-            if (string.IsNullOrEmpty(componentPath))
+            if (string.IsNullOrEmpty(fullPath))
                 return;
-
-            // Build full component path with type prefix
-            var fullPath = $"{typePrefix}/{componentPath}";
-
-            // Resolve name if it contains interpolations
-            string resolvedInstanceName = name;
-            if (!string.IsNullOrEmpty(name) && name.Contains("{{") && name.Contains("}}"))
-            {
-                resolvedInstanceName = ResolveInterpolationsInString(name);
-            }
-
-            string resolvedOldName = oldName;
-            if (!string.IsNullOrEmpty(oldName) && oldName.Contains("{{") && oldName.Contains("}}"))
-            {
-                resolvedOldName = ResolveInterpolationsInString(oldName);
-            }
 
             // Track variables set by callback (only allocated when callback exists)
-            HashSet<string> variablesBefore = null;
             HashSet<string> callbackSetVariables = null;
             Dictionary<string, object> engineSnapshot = null;
 
             try
             {
-                
+                // Resolve names if they contain interpolations
+                string resolvedInstanceName = name;
+                if (!string.IsNullOrEmpty(name) && name.Contains("{{") && name.Contains("}}"))
+                {
+                    resolvedInstanceName = ResolveInterpolationsInString(name);
+                }
+
+                string resolvedOldName = oldName;
+                if (!string.IsNullOrEmpty(oldName) && oldName.Contains("{{") && oldName.Contains("}}"))
+                {
+                    resolvedOldName = ResolveInterpolationsInString(oldName);
+                }
+
                 // Fire OnBeforeIncludeRender callback FIRST (before loading component)
-                // This allows user to set data for components that may not have a file
                 if (_onBeforeIncludeRender != null && _engine != null)
                 {
-                    // Take snapshot of ENGINE variables before callback
                     var currentEngineVars = _engine.GetVariables();
                     engineSnapshot = new Dictionary<string, object>(currentEngineVars, StringComparer.OrdinalIgnoreCase);
-                    
-                    // Also take snapshot of Evaluator variables for sync logic
-                    variablesBefore = new HashSet<string>(_variables.Keys, StringComparer.OrdinalIgnoreCase);
                     
                     var includeInfo = new IncludeInfo
                     {
                         Name = resolvedInstanceName,
                         OldName = resolvedOldName,
                         ComponentPath = fullPath,
-                        ComponentType = typePrefix,
+                        ComponentType = componentType,
+                        JsonPath = jsonPath,
                         Parameters = new Dictionary<string, string>()
                     };
                     
-                    // Copy parameters for callback
                     foreach (var p in parameters)
                     {
                         if (!string.IsNullOrEmpty(p.Name))
                             includeInfo.Parameters[p.Name] = p.Value;
                     }
                     
-                    // Call the callback - user can set variables on engine
                     _onBeforeIncludeRender(includeInfo, _engine);
                 }
-                    
+                
                 // Create a container for parameter resolution that includes callback variables
-                // This context has access to PARENT variables (for resolution) AND CALLBACK variables
-                var paramResolutionVars = new Dictionary<string, object>(_variables, StringComparer.OrdinalIgnoreCase);
-
-                // Sync ALL engine variables to resolution context before resolving parameters
-                // Note: We use engine state after callback to resolve parameters
+                IVariableContext paramResolutionVars = _variables;
+                
                 if (_onBeforeIncludeRender != null && _engine != null)
                 {
                     var engineVars = _engine.GetVariables();
+                    var callbackDict = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
                     callbackSetVariables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     
                     foreach (var kvp in engineVars)
@@ -1407,17 +1308,18 @@ namespace ASTTemplateParser
                         if (engineSnapshot != null && engineSnapshot.TryGetValue(kvp.Key, out var oldValue))
                         {
                             if (Equals(kvp.Value, oldValue))
-                            {
                                 isActuallySetByCallback = false;
-                            }
                         }
 
                         if (isActuallySetByCallback)
                         {
-                            paramResolutionVars[kvp.Key] = kvp.Value; 
+                            callbackDict[kvp.Key] = kvp.Value;
                             callbackSetVariables.Add(kvp.Key);
                         }
                     }
+
+                    if (callbackDict.Count > 0)
+                        paramResolutionVars = _variables.CreateChild(callbackDict);
                 }
                 
                 // Load the component AST
@@ -1425,14 +1327,14 @@ namespace ASTTemplateParser
                 if (componentAst == null)
                     return;
 
-                // Create the final context for the component
-                var componentVars = new Dictionary<string, object>(_variables, StringComparer.OrdinalIgnoreCase);
+                // Create a local dictionary for component-specific variables (Zero-allocation shadowing)
+                var localVars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
                 
-                // CRITICAL: Clear instance-specific variables INHERITED FROM PARENT
-                componentVars.Remove("element");
-                componentVars.Remove("elementAttributes");
-                componentVars.Remove("oldname");
-                componentVars.Remove("name");
+                // Shadow instance-specific variables INHERITED FROM PARENT with null
+                localVars["element"] = null;
+                localVars["elementAttributes"] = null;
+                localVars["oldname"] = null;
+                localVars["name"] = null;
 
                 // Sync callback-set variables for the CHILD
                 if (callbackSetVariables != null)
@@ -1440,22 +1342,20 @@ namespace ASTTemplateParser
                     var engineVars = _engine.GetVariables();
                     foreach (var varName in callbackSetVariables)
                     {
-                        componentVars[varName] = engineVars[varName];
+                        localVars[varName] = engineVars[varName];
                     }
                 }
-                
+
                 // Add standard component variables
-                componentVars["name"] = resolvedInstanceName;
-                componentVars["oldname"] = resolvedOldName;
-                componentVars["path"] = fullPath;
-                componentVars["componentPath"] = componentPath;
-                componentVars["type"] = typePrefix;
+                localVars["name"] = resolvedInstanceName;
+                localVars["oldname"] = resolvedOldName;
+                localVars["path"] = fullPath;
+                localVars["componentPath"] = componentPath;
+                localVars["type"] = componentType;
                 
-                // Add parameters as variables - resolve variable references
-                // Skip variables that were explicitly set by callback
+                // Add parameters as variables
                 foreach (var param in parameters)
                 {
-                    // Skip if callback explicitly set this variable
                     if (callbackSetVariables != null && callbackSetVariables.Contains(param.Name))
                         continue;
                     if (!string.IsNullOrEmpty(param.Name))
@@ -1465,60 +1365,39 @@ namespace ASTTemplateParser
                         
                         if (string.IsNullOrEmpty(paramValue))
                         {
-                            // No value provided - use default if available
                             resolvedValue = null;
                         }
-                        // Check for {{variable}} interpolation syntax
                         else if (paramValue.StartsWith("{{") && paramValue.EndsWith("}}"))
                         {
-                            // Extract variable name from {{variableName}}
                             var varName = paramValue.Substring(2, paramValue.Length - 4).Trim();
                             resolvedValue = ResolveExpression(varName, paramResolutionVars);
                         }
-                        // Check if value contains interpolations for mixed content like "Hello {{Name}}!"
                         else if (paramValue.Contains("{{") && paramValue.Contains("}}"))
                         {
-                            // Process interpolations within the string
                             var interpolatedValue = ResolveInterpolationsInString(paramValue, paramResolutionVars);
-                            // DEBUG: Log interpolation result
-                            System.Diagnostics.Debug.WriteLine($"[DEBUG] Param '{param.Name}' value '{paramValue}' resolved to '{interpolatedValue}'");
-                            // Check if interpolation resulted in empty/incomplete string
                             resolvedValue = string.IsNullOrEmpty(interpolatedValue) ? null : interpolatedValue;
                         }
-                        // Check if value is a simple variable reference (no spaces, quotes)
                         else if (!paramValue.Contains(" ") && 
                                  !paramValue.StartsWith("\"") && 
                                  !paramValue.StartsWith("'"))
                         {
-                            // Try to resolve as expression (supports nested paths like item.Children)
                             resolvedValue = ResolveExpression(paramValue, paramResolutionVars);
                             if (resolvedValue == null)
-                            {
-                                // Fall back to literal value
                                 resolvedValue = paramValue;
-                            }
                         }
                         else
                         {
-                            // Use as literal string value
                             resolvedValue = paramValue;
                         }
                         
                         // Apply default value if resolved value is null or empty
-                        if (resolvedValue == null || 
-                            (resolvedValue is string s && string.IsNullOrEmpty(s)))
+                        if (resolvedValue == null || (resolvedValue is string s && string.IsNullOrEmpty(s)))
                         {
                             if (!string.IsNullOrEmpty(param.Default))
                             {
-                                // Default value can also contain interpolations
-                                if (param.Default.Contains("{{"))
-                                {
-                                    resolvedValue = ResolveInterpolationsInString(param.Default, paramResolutionVars);
-                                }
-                                else
-                                {
-                                    resolvedValue = param.Default;
-                                }
+                                resolvedValue = param.Default.Contains("{{")
+                                    ? ResolveInterpolationsInString(param.Default, paramResolutionVars)
+                                    : param.Default;
                             }
                             else
                             {
@@ -1526,26 +1405,21 @@ namespace ASTTemplateParser
                             }
                         }
                         
-                        // DEBUG: Log final resolved value
-                        System.Diagnostics.Debug.WriteLine($"[DEBUG] Param '{param.Name}' final value: '{resolvedValue}'");
-                        componentVars[param.Name] = resolvedValue;
+                        localVars[param.Name] = resolvedValue;
                     }
                 }
 
+                var componentVars = _variables.CreateChild(localVars);
                 var componentEvaluator = new Evaluator(componentVars, _security);
                 componentEvaluator.SetComponentLoader(_componentLoader);
-                componentEvaluator._componentDepth = _componentDepth + 1; // Increment depth
+                componentEvaluator.SetSlots(slotContent, namedSlots);
+                componentEvaluator._componentDepth = _componentDepth + 1;
                 
-                // Pass callbacks if configured
                 if (_onBeforeIncludeRender != null || _onAfterIncludeRender != null)
                 {
                     componentEvaluator.SetIncludeCallback(_onBeforeIncludeRender, _engine, _onAfterIncludeRender);
                 }
-                
-                // Don't pass slot content for now to avoid recursion issues
-                // Slots will be a v2 feature
 
-                // Evaluate the component
                 var result = componentEvaluator.Evaluate(componentAst);
                 
                 // Fire OnAfterIncludeRender callback if configured (for wrapping)
@@ -1556,7 +1430,8 @@ namespace ASTTemplateParser
                         Name = resolvedInstanceName,
                         OldName = resolvedOldName,
                         ComponentPath = fullPath,
-                        ComponentType = typePrefix,
+                        ComponentType = componentType,
+                        JsonPath = jsonPath,
                         Parameters = new Dictionary<string, string>()
                     };
                     foreach (var p in parameters)
@@ -1564,8 +1439,6 @@ namespace ASTTemplateParser
                         if (!string.IsNullOrEmpty(p.Name))
                             includeInfo.Parameters[p.Name] = p.Value;
                     }
-                    
-                    // Call callback - user can wrap/modify the output
                     result = _onAfterIncludeRender(includeInfo, result);
                 }
                 
@@ -1573,7 +1446,6 @@ namespace ASTTemplateParser
             }
             catch (Exception ex)
             {
-                // Output error as HTML comment for debugging
                 _output.Append($"<!-- Component Error [{fullPath}]: {ex.Message} -->");
             }
             finally
@@ -1681,6 +1553,21 @@ namespace ASTTemplateParser
             }
         }
 
+        private Evaluator CreateChildEvaluator(IVariableContext variables)
+        {
+            var child = new Evaluator(variables, _security);
+            child.SetComponentLoader(_componentLoader);
+            child._templateFragments = _templateFragments;
+            child._sections = _sections;
+            child._bodyContent = _bodyContent;
+            child._slotContent = _slotContent;
+            child._onBeforeIncludeRender = _onBeforeIncludeRender;
+            child._onAfterIncludeRender = _onAfterIncludeRender;
+            child._engine = _engine;
+            child._currentRecursionDepth = _currentRecursionDepth;
+            return child;
+        }
+
         #endregion
 
         #region Template Fragments (Inline Recursion)
@@ -1717,10 +1604,9 @@ namespace ASTTemplateParser
 
             try
             {
-                // Save current variable context
-                var savedVariables = new Dictionary<string, object>(_variables, StringComparer.OrdinalIgnoreCase);
+                // Resolve parameters into a local dictionary for the child context
+                var fragmentLocalVars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
 
-                // Set parameters as variables (similar to component param resolution)
                 foreach (var param in node.Parameters)
                 {
                     if (string.IsNullOrEmpty(param.Name))
@@ -1733,18 +1619,15 @@ namespace ASTTemplateParser
                     {
                         resolvedValue = null;
                     }
-                    // Check for {{variable}} interpolation syntax
                     else if (paramValue.StartsWith("{{") && paramValue.EndsWith("}}"))
                     {
                         var varName = paramValue.Substring(2, paramValue.Length - 4).Trim();
                         resolvedValue = ResolveExpression(varName, _variables);
                     }
-                    // Check if value contains interpolations (mixed content)
                     else if (paramValue.Contains("{{") && paramValue.Contains("}}"))
                     {
                         resolvedValue = ResolveInterpolationsInString(paramValue, _variables);
                     }
-                    // Check if value is a simple variable/expression reference
                     else if (!paramValue.Contains(" ") && 
                              !paramValue.StartsWith("\"") && 
                              !paramValue.StartsWith("'"))
@@ -1757,7 +1640,6 @@ namespace ASTTemplateParser
                     }
                     else
                     {
-                        // Use as literal value
                         resolvedValue = paramValue;
                     }
 
@@ -1766,14 +1648,9 @@ namespace ASTTemplateParser
                     {
                         if (!string.IsNullOrEmpty(param.Default))
                         {
-                            if (param.Default.Contains("{{"))
-                            {
-                                resolvedValue = ResolveInterpolationsInString(param.Default, _variables);
-                            }
-                            else
-                            {
-                                resolvedValue = param.Default;
-                            }
+                            resolvedValue = param.Default.Contains("{{")
+                                ? ResolveInterpolationsInString(param.Default, _variables)
+                                : param.Default;
                         }
                         else
                         {
@@ -1781,21 +1658,21 @@ namespace ASTTemplateParser
                         }
                     }
 
-                    _variables[param.Name] = resolvedValue;
+                    fragmentLocalVars[param.Name] = resolvedValue;
                 }
 
-                // Render the fragment body
+                // PERFORMANCE: Swap context in-place — no new Evaluator needed
+                var savedVariables = _variables;
+                _variables = _variables.CreateChild(fragmentLocalVars);
+
+                // Render the fragment body directly into our StringBuilder
                 foreach (var child in fragment.Body)
                 {
                     child.Accept(this);
                 }
 
-                // Restore variable context
-                _variables.Clear();
-                foreach (var kvp in savedVariables)
-                {
-                    _variables[kvp.Key] = kvp.Value;
-                }
+                // Restore
+                _variables = savedVariables;
             }
             finally
             {

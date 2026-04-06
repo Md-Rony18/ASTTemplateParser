@@ -82,6 +82,11 @@ namespace ASTTemplateParser
         /// </summary>
         public bool RemoveEmptyAttributes { get; set; } = false;
 
+        /// <summary>
+        /// Whether to show detailed error comments for null variables or failed paths (default: false for production)
+        /// </summary>
+        public bool EnableStrictMode { get; set; } = false;
+
         #endregion
 
         #region Expression Security
@@ -197,6 +202,17 @@ namespace ASTTemplateParser
     }
 
     /// <summary>
+    /// Wrapper for strings that should NOT be HTML encoded
+    /// </summary>
+    public sealed class RawString 
+    {
+        private readonly string _value;
+        public RawString(string value) { _value = value ?? string.Empty; }
+        public override string ToString() => _value;
+        public static implicit operator RawString(string s) => new RawString(s);
+    }
+
+    /// <summary>
     /// MAXIMUM SECURITY utilities for template processing
     /// Uses whitelist approach - only explicitly allowed content passes
     /// </summary>
@@ -246,6 +262,36 @@ namespace ASTTemplateParser
             @"^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$",
             RegexOptions.Compiled);
 
+        // Pre-compiled regex for RemoveEmptyAttributes (avoids re-compilation on every call)
+        private static readonly Regex EmptyAttributeRegex = new Regex(
+            @"\s+[a-zA-Z0-9-]+=""\s*""", RegexOptions.Compiled);
+
+        // Pre-compiled regex for StripHtml (avoids re-compilation on every call)
+        private static readonly Regex HtmlTagRegex = new Regex(
+            @"<[^>]*>", RegexOptions.Compiled);
+
+        // Pre-computed blocked type patterns with "." suffix (avoids string concat in hot loop)
+        // Built lazily from SecurityConfig on first use
+        private static HashSet<string> _defaultBlockedTypePatterns;
+        private static HashSet<string> GetBlockedTypePatterns(SecurityConfig config)
+        {
+            // For the default config, use cached patterns
+            if (config == SecurityConfig.Default)
+            {
+                if (_defaultBlockedTypePatterns == null)
+                {
+                    _defaultBlockedTypePatterns = new HashSet<string>(
+                        config.BlockedTypeNames.Select(t => t + "."),
+                        StringComparer.OrdinalIgnoreCase);
+                }
+                return _defaultBlockedTypePatterns;
+            }
+            // For custom configs, compute fresh (rare path)
+            return new HashSet<string>(
+                config.BlockedTypeNames.Select(t => t + "."),
+                StringComparer.OrdinalIgnoreCase);
+        }
+
         #endregion
 
         #region Whitelisted Safe Content
@@ -291,6 +337,26 @@ namespace ASTTemplateParser
             if (expression.Contains('\0'))
                 return false;
 
+            // FAST PATH: Simple variable names (no dots, no parens, no brackets)
+            // These are always safe — skip expensive regex checks entirely
+            // Examples: "Title", "Name", "IsActive", "count"
+            bool hasDot = false, hasParen = false, hasBracket = false;
+            bool isSimple = true;
+            for (int i = 0; i < expression.Length; i++)
+            {
+                char c = expression[i];
+                if (c == '.') hasDot = true;
+                else if (c == '(') hasParen = true;
+                else if (c == '[' || c == ']') hasBracket = true;
+                
+                // Simple = only letters, digits, underscore
+                if (!char.IsLetterOrDigit(c) && c != '_' && c != ' ')
+                    isSimple = false;
+            }
+            
+            if (isSimple && !hasDot && !hasParen && !hasBracket)
+                return true; // Simple variable name — always safe, skip regex
+
             // Strict mode: Only allow safe characters
             if (config.StrictExpressionMode && !SafeExpressionChars.IsMatch(expression))
                 return false;
@@ -304,20 +370,22 @@ namespace ASTTemplateParser
                 return false;
 
             // Check for method calls if not allowed
-            if (!config.AllowMethodCalls && expression.Contains("(") && !IsAllowedFunctionCall(expression))
+            if (!config.AllowMethodCalls && hasParen && !IsAllowedFunctionCall(expression))
                 return false;
 
             // Check for indexer access if not allowed
-            if (!config.AllowIndexerAccess && (expression.Contains("[") || expression.Contains("]")))
+            if (!config.AllowIndexerAccess && hasBracket)
                 return false;
 
-            // Check for blocked type references (only whole words, not substrings)
-            foreach (var blockedType in config.BlockedTypeNames)
+            // Check for blocked type references using pre-computed patterns (no string concat!)
+            if (hasDot)
             {
-                // Check for Type. pattern (like System. or File.)
-                var typeWithDot = blockedType + ".";
-                if (expression.IndexOf(typeWithDot, StringComparison.OrdinalIgnoreCase) >= 0)
-                    return false;
+                var blockedPatterns = GetBlockedTypePatterns(config);
+                foreach (var pattern in blockedPatterns)
+                {
+                    if (expression.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return false;
+                }
             }
 
             return true;
@@ -474,6 +542,10 @@ namespace ASTTemplateParser
             if (value == null)
                 return string.Empty;
 
+            // Fast path for raw strings (skip encoding)
+            if (value is RawString)
+                return value.ToString();
+
             var str = value.ToString();
             if (string.IsNullOrEmpty(str))
                 return string.Empty;
@@ -506,8 +578,8 @@ namespace ASTTemplateParser
             if (string.IsNullOrEmpty(input))
                 return input;
 
-            // Remove all HTML tags
-            return Regex.Replace(input, @"<[^>]*>", string.Empty, RegexOptions.Compiled);
+            // Remove all HTML tags (using pre-compiled static regex)
+            return HtmlTagRegex.Replace(input, string.Empty);
         }
 
         /// <summary>
@@ -520,7 +592,8 @@ namespace ASTTemplateParser
 
             // Pattern: match whitespace followed by attribute name, =", optional internal whitespace, and closing "
             // Example: [ class=""] or [ id="  "]
-            return Regex.Replace(input, @"\s+[a-zA-Z0-9-]+=""\s*""", string.Empty, RegexOptions.Compiled);
+            // Using pre-compiled static regex for best performance
+            return EmptyAttributeRegex.Replace(input, string.Empty);
         }
 
         /// <summary>
@@ -620,8 +693,9 @@ namespace ASTTemplateParser
                 result.Errors.Add("Template contains script tags which are not allowed");
             }
 
-            // Check for event handlers
-            if (Regex.IsMatch(template, @"\bon\w+\s*=", RegexOptions.IgnoreCase))
+            // Check for event handlers (require HTML attribute context to avoid false positives
+            // with words like "online", "ongoing" in template expressions)
+            if (Regex.IsMatch(template, @"<[^>]*\bon\w+\s*=\s*['""]", RegexOptions.IgnoreCase))
             {
                 result.IsValid = false;
                 result.Errors.Add("Template contains inline event handlers which are not allowed");

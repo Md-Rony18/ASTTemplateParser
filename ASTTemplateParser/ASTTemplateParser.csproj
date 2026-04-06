@@ -10,7 +10,7 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.1.0</Version>
+    <Version>2.2.3</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
@@ -30,6 +30,84 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
+v2.2.3 - (April 6, 2026)
+- FIXED: Ternary operator and complex logical conditions inside interpolation tags (e.g., {{ item['Prop'] == 'Val' ? 'a' : 'b' }}). Improved ResolveExpression logic to correctly delegate complex expressions to the NCalc engine instead of incorrectly treating them as simple indexers.
+
+v2.2.2 - (April 4, 2026)
+- ADDED: High-performance ReadFile helper in TemplateEngine — supports reading data files (JSON, TXT, HTML, etc.) from global and local template directories.
+- IMPROVED: Smart Caching for ReadFile — reduces disk I/O by caching raw file content in memory with automatic invalidation on file modification.
+- IMPROVED: Generic extension support in ReadFile — intelligently resolves any file extension beyond just .html.
+
+v2.2.1 - (April 4, 2026)
+- ADDED: JsonPath property on IncludeInfo — extracted from the jsonpath="..." attribute on Include, Element, Data, Nav, and Block tags. Available in PrepareTemplate(), OnBeforeIncludeRender, and OnAfterIncludeRender callbacks.
+
+v2.2.0 - (March 29, 2026)
+- UPGRADED: BlockParser attribute extraction is now extremely robust, supporting double-quoted, single-quoted, and unquoted attribute values (e.g., component=about).
+- FIXED: Guards in BlockParser now use IsNullOrWhiteSpace() to prevent blocks with empty/whitespace templates from being returned to the CMS, avoiding database validation errors.
+
+v2.1.9 - (March 29, 2026)
+- FIXED: ResolveTemplatePath() folder fallback (default.html) was broken for all paths that already had the .html extension appended by ResolveDualPath. When Option 1 (direct .html file) failed, Option 3 tried Directory.Exists on a path ending in ".html" which is always false. Now correctly strips the .html extension before checking for a matching folder/default.html.
+
+v2.1.8 - (March 28, 2026)
+- FIXED: RenderBlock() was blindly prepending "block/" to ComponentPath even when it already started with "block/", resulting in "block/block/about" double-prefix paths that caused FileNotFoundException. ComponentPath is now used as-is when it already contains the prefix.
+
+v2.1.7 - (March 28, 2026)
+- FIXED: RenderPrepared() was silently ignoring website-scoped globals (_myWebsiteGlobals) — now uses LayeredVariableLookup identical to Render(), ensuring correct variable priority in multi-tenant CMS.
+- FIXED: PreWarmComponents() was parsing each component's AST twice (once for content-hash key, once for component-path key) — AST is now parsed once and the same entry is reused for both keys.
+
+v2.1.6 - (March 28, 2026)
+- FIXED: ResolvePagePath() returned null when only SetLocalPagesDirectory() was configured (global directory was not set).
+- FIXED: ResolveComponentPath() returned null when only SetLocalComponentsDirectory() was configured.
+- IMPROVED: Both methods now correctly fall back to dual-path resolution as long as at least one directory (local or global) is configured.
+
+v2.1.5 - (March 28, 2026)
+- FIXED: BlockParser dual-path support — BlockParser now uses the same resolution logic as the engine (local pages override).
+- FIXED: Auto .html extension in ResolveDualPath — ensures files are found even when passed without extension (e.g., from CMS).
+- ADDED: ResolvePagePath() and ResolveComponentPath() public methods to TemplateEngine for manual path resolution.
+- IMPROVED: ValidatePagePath() in BlockParser now correctly validates against both local and global allowed directories.
+
+v2.1.4 - (March 28, 2026)
+- ADDED: SetLocalComponentsDirectory() — per-engine local components path that can override or fall back to the global path.
+- ADDED: SetLocalPagesDirectory() — per-engine local pages path with same dual-path resolution logic.
+- ADDED: SetDirectoryPriority(preferGlobal) — controls lookup order. false (default) = local first; true = global first.
+- IMPROVED: LoadComponent(), RenderFile(), and RenderCachedFile() all support priority-aware dual-path resolution.
+- IMPROVED: Security checks now validate against both local and global allowed paths.
+- IMPROVED: ResolveDualPath() helper centralises path resolution to eliminate code duplication.
+
+v2.1.3 - (March 11, 2026)
+- ADDED: Website-Scoped Globals support via SetGlobalVariable(key, value, websiteId).
+- FIXED: Global Variable Cache Invalidation — changing global variables now correctly invalidates data-aware caches.
+- PERFORMANCE: Optimized property access and variable resolution.
+- STABILITY: Improved security validation and expression evaluation logic.
+- IMPROVED: Refined internal template caching and rendering flow.
+
+v2.1.2 - (March 10, 2026)
+- PERFORMANCE: Zero-allocation ForEach loops — in-place context swap eliminates ~400 object allocations per 100-item loop.
+- PERFORMANCE: Zero-allocation Fragment rendering — renders directly into parent StringBuilder, no child Evaluator created.
+- PERFORMANCE: Ultra-fast expression path — simple variables ({{ Name }}) skip character scan entirely (~2-3x faster).
+- PERFORMANCE: Fast nested path resolution — 2-part (item.Name) and 3-part (a.b.c) paths resolve with zero StringBuilder allocation (~3x faster).
+- PERFORMANCE: IVariableContext interface with HierarchicalVariableContext for zero-copy variable shadowing in loops and components.
+- PERFORMANCE: LayeredVariableLookup implements IVariableContext directly — eliminates ToMergedDictionary() at render start.
+- PERFORMANCE: PropertyAccessor IDictionary lookup optimized — removed O(N) case-insensitive fallback search.
+- PERFORMANCE: NCalc parameter loading uses ToDictionary() only when needed.
+- ADDED: PreWarmThemes() — static method to pre-cache all theme templates at app startup for multi-tenant CMS.
+- ADDED: PreWarmComponents() / PreWarmPages() / PreWarmAll() — instance methods for single-theme pre-warming.
+- ADDED: PreWarmDirectory() — static method for custom directory pre-warming.
+- ADDED: Configurable subfolder names in PreWarmThemes() via params string[] subFolders.
+- ADDED: CacheStatistics now includes RenderCacheCount and PathCacheCount.
+- SECURITY: Auto HTML encoding on all {{ variable }} outputs by default (XSS prevention).
+- SECURITY: RawString class and | raw filter for explicit encoding bypass.
+- SECURITY: EnableStrictMode for debugging null/missing variables.
+
+v2.1.1 - (March 2, 2026)
+- FIXED: ClearCaches() now properly clears ALL caches (render, path, block, segment, expression, property accessor).
+- FIXED: Path cache stale data - ResolveTemplatePath validates File.Exists() before returning cached path.
+- FIXED: RenderCachedFile now detects component file changes via component version tracking.
+- FIXED: ComputeDataHash uses content-aware hashing for collections (List, Dictionary) instead of reference-based.
+- FIXED: Expression cache race condition - eviction check moved outside GetOrAdd factory delegate.
+- FIXED: Duplicate MaxLoopIterations check removed from ForEach evaluation.
+- PERFORMANCE: ForEach loop metadata Dictionary allocated once and reused across iterations.
+
 v2.1.0 - (February 28, 2026)
 - ADDED: Loop Metadata - Automatic {{loop.index}}, {{loop.count}}, and {{loop.first}} support in ForEach.
 - ADDED: Attr Filter - Cleanly render attributes only when values exist (e.g., {{ class | attr:"class" }}).

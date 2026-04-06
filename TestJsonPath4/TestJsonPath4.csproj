@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="ASTTemplateParser">
+      <HintPath>d:\Asp.net Software\Cms\packages\ASTTemplateParser.2.2.1\lib\net8.0\ASTTemplateParser.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>

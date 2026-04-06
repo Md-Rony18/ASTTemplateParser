@@ -146,6 +146,9 @@ namespace ASTTemplateParser
             // Extract component path from metadata (e.g., component="subTitle")
             node.ComponentPath = ExtractAttributeFromMetadata(token.Metadata, "component");
             
+            // Extract JSON path
+            node.JsonPath = ExtractAttributeFromMetadata(token.Metadata, "jsonpath");
+            
             // Extract name for cache key
             node.Name = ExtractAttributeFromMetadata(token.Metadata, "name");
             
@@ -186,6 +189,9 @@ namespace ASTTemplateParser
             // Extract component path from metadata (e.g., component="userData")
             node.ComponentPath = ExtractAttributeFromMetadata(token.Metadata, "component");
             
+            // Extract JSON path
+            node.JsonPath = ExtractAttributeFromMetadata(token.Metadata, "jsonpath");
+            
             // Extract name for cache key
             node.Name = ExtractAttributeFromMetadata(token.Metadata, "name");
             
@@ -223,6 +229,9 @@ namespace ASTTemplateParser
             // Extract component path from metadata (e.g., component="mainMenu")
             node.ComponentPath = ExtractAttributeFromMetadata(token.Metadata, "component");
             
+            // Extract JSON path
+            node.JsonPath = ExtractAttributeFromMetadata(token.Metadata, "jsonpath");
+            
             // Extract name for cache key
             node.Name = ExtractAttributeFromMetadata(token.Metadata, "name");
             
@@ -259,6 +268,9 @@ namespace ASTTemplateParser
 
             // Extract component path from metadata (e.g., component="slider")
             node.ComponentPath = ExtractAttributeFromMetadata(token.Metadata, "component");
+            
+            // Extract JSON path
+            node.JsonPath = ExtractAttributeFromMetadata(token.Metadata, "jsonpath");
             
             // Extract name for cache key
             node.Name = ExtractAttributeFromMetadata(token.Metadata, "name");
@@ -416,6 +428,9 @@ namespace ASTTemplateParser
 
             // Extract component path from metadata (e.g., component="path/to/component")
             node.ComponentPath = ExtractAttributeFromMetadata(token.Metadata, "component");
+            
+            // Extract JSON path
+            node.JsonPath = ExtractAttributeFromMetadata(token.Metadata, "jsonpath");
             
             // Extract name for cache key
             node.Name = ExtractAttributeFromMetadata(token.Metadata, "name");

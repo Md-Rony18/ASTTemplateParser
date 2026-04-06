@@ -151,20 +151,23 @@ namespace ASTTemplateParser
                 throw new InvalidOperationException("TemplateEngine not configured. Use BlockParser(engine) constructor or ParseBlocks(fullPath, pageName) overload.");
             }
 
-            if (string.IsNullOrEmpty(_engine.PagesDirectory))
+            // Resolve path using dual-path logic (local override support)
+            var templatePath = _engine.ResolvePagePath(pageName);
+            
+            if (string.IsNullOrEmpty(templatePath))
             {
-                throw new InvalidOperationException("PagesDirectory not configured. Call engine.SetPagesDirectory() first.");
+                var dirs = new List<string>();
+                if (!string.IsNullOrEmpty(_engine.PagesDirectory)) dirs.Add(_engine.PagesDirectory);
+                if (!string.IsNullOrEmpty(_engine.LocalPagesDirectory)) dirs.Add(_engine.LocalPagesDirectory);
+                
+                if (dirs.Count == 0)
+                    throw new InvalidOperationException("No page directories configured. Call SetPagesDirectory() or SetLocalPagesDirectory() first.");
+                    
+                throw new FileNotFoundException($"Page template not found: {pageName}. Searched in: {string.Join(", ", dirs)}");
             }
 
-            // Build full path from pages directory
-            var templatePath = Path.Combine(_engine.PagesDirectory, pageName);
-            if (!templatePath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
-            {
-                templatePath += ".html";
-            }
-
-            // Security: prevent path traversal
-            ValidatePath(templatePath, _engine.PagesDirectory);
+            // Security: prevent path traversal (check against both allowed directories)
+            ValidatePagePath(templatePath);
 
             return ParseBlocksFromFile(templatePath, pageName);
         }
@@ -244,7 +247,7 @@ namespace ASTTemplateParser
                 string oldNameAttr = ExtractAttribute(attributes, "oldname");
                 string oldName = string.IsNullOrEmpty(oldNameAttr) ? name : oldNameAttr;
 
-                if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(component))
+                if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(component))
                     continue;
 
                 // Security: validate component path (no path traversal)
@@ -281,19 +284,23 @@ namespace ASTTemplateParser
                 throw new InvalidOperationException("TemplateEngine not configured. Use BlockParser(engine) constructor.");
             }
 
-            if (string.IsNullOrEmpty(_engine.PagesDirectory))
+            // Resolve path using dual-path logic (local override support)
+            var templatePath = _engine.ResolvePagePath(pageName);
+            
+            if (string.IsNullOrEmpty(templatePath))
             {
-                throw new InvalidOperationException("PagesDirectory not configured. Call engine.SetPagesDirectory() first.");
+                var dirs = new List<string>();
+                if (!string.IsNullOrEmpty(_engine.PagesDirectory)) dirs.Add(_engine.PagesDirectory);
+                if (!string.IsNullOrEmpty(_engine.LocalPagesDirectory)) dirs.Add(_engine.LocalPagesDirectory);
+                
+                if (dirs.Count == 0)
+                    throw new InvalidOperationException("No page directories configured. Call SetPagesDirectory() or SetLocalPagesDirectory() first.");
+                    
+                throw new FileNotFoundException($"Page template not found: {pageName}. Searched in: {string.Join(", ", dirs)}");
             }
 
-            var templatePath = Path.Combine(_engine.PagesDirectory, pageName);
-            if (!templatePath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
-            {
-                templatePath += ".html";
-            }
-
-            // Security: prevent path traversal
-            ValidatePath(templatePath, _engine.PagesDirectory);
+            // Security: prevent path traversal (check against both allowed directories)
+            ValidatePagePath(templatePath);
 
             if (!File.Exists(templatePath))
             {
@@ -369,7 +376,7 @@ namespace ASTTemplateParser
                 string oldName = string.IsNullOrEmpty(oldNameAttr) ? name : oldNameAttr;
 
                 // Validate block - if invalid, treat as raw HTML so it doesn't disappear from UI
-                if (!string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(component)
+                if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(component)
                     && !component.Contains("..") && !component.Contains(":")) // Security check
                 {
                     var block = new BlockInfo
@@ -440,14 +447,49 @@ namespace ASTTemplateParser
         }
 
         /// <summary>
-        /// Extracts an attribute value from an attribute string
+        /// Extracts an attribute value from an attribute string with support for 
+        /// quoted (" ", ' ') and unquoted values.
         /// </summary>
         private string ExtractAttribute(string attributes, string attributeName)
         {
-            // Match: attributeName="value" or attributeName='value'
-            var pattern = $@"{attributeName}\s*=\s*[""']([^""']*)[""']";
-            var match = Regex.Match(attributes, pattern, RegexOptions.IgnoreCase);
-            return match.Success ? match.Groups[1].Value : null;
+            if (string.IsNullOrEmpty(attributes) || string.IsNullOrEmpty(attributeName))
+                return null;
+
+            var searchStr = attributeName + "=";
+            var index = attributes.IndexOf(searchStr, StringComparison.OrdinalIgnoreCase);
+
+            if (index == -1) return null;
+
+            // Ensure it's a word boundary (not part of another attribute like "oldname" matching "name")
+            if (index > 0 && char.IsLetterOrDigit(attributes[index - 1]))
+                return null;
+
+            var start = index + searchStr.Length;
+
+            // Skip whitespace after '='
+            while (start < attributes.Length && char.IsWhiteSpace(attributes[start]))
+                start++;
+
+            if (start >= attributes.Length) return null;
+
+            // Handle quoted values
+            var quote = attributes[start];
+            if (quote == '"' || quote == '\'')
+            {
+                start++;
+                var end = attributes.IndexOf(quote, start);
+                return end == -1 ? null : attributes.Substring(start, end - start);
+            }
+
+            // Handle unquoted values (stop at whitespace or end of tag)
+            var endPos = start;
+            while (endPos < attributes.Length && !char.IsWhiteSpace(attributes[endPos]))
+            {
+                endPos++;
+            }
+
+            var value = attributes.Substring(start, endPos - start);
+            return string.IsNullOrWhiteSpace(value) ? null : value;
         }
 
         /// <summary>
@@ -482,18 +524,34 @@ namespace ASTTemplateParser
         public static int SegmentCacheCount => _segmentCache.Count;
 
         /// <summary>
-        /// Validates that the resolved path is within the allowed base directory
-        /// Prevents path traversal attacks (e.g., ../../etc/passwd)
+        /// Validates that the resolved path is within the allowed page directories
         /// </summary>
-        private static void ValidatePath(string resolvedPath, string baseDirectory)
+        private void ValidatePagePath(string resolvedPath)
         {
             var fullResolved = Path.GetFullPath(resolvedPath);
-            var fullBase = Path.GetFullPath(baseDirectory);
+            
+            bool allowed = false;
+            
+            // Check global pages directory
+            if (!string.IsNullOrEmpty(_engine.PagesDirectory))
+            {
+                var fullBase = Path.GetFullPath(_engine.PagesDirectory);
+                if (fullResolved.StartsWith(fullBase, StringComparison.OrdinalIgnoreCase))
+                    allowed = true;
+            }
+            
+            // Check local pages directory
+            if (!allowed && !string.IsNullOrEmpty(_engine.LocalPagesDirectory))
+            {
+                var fullLocal = Path.GetFullPath(_engine.LocalPagesDirectory);
+                if (fullResolved.StartsWith(fullLocal, StringComparison.OrdinalIgnoreCase))
+                    allowed = true;
+            }
 
-            if (!fullResolved.StartsWith(fullBase, StringComparison.OrdinalIgnoreCase))
+            if (!allowed)
             {
                 throw new UnauthorizedAccessException(
-                    "Access denied: template path is outside the allowed directory.");
+                    "Access denied: template path is outside the allowed page directories.");
             }
         }
     }

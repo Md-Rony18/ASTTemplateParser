@@ -112,6 +112,11 @@ namespace ASTTemplateParser
         public string ComponentPath { get; set; }
         
         /// <summary>
+        /// JSON path for component data binding
+        /// </summary>
+        public string JsonPath { get; set; }
+        
+        /// <summary>
         /// Unique name/identifier for the component instance (used for caching)
         /// </summary>
         public string Name { get; set; }
@@ -153,6 +158,11 @@ namespace ASTTemplateParser
         /// Component path (relative to data/ folder when used as component)
         /// </summary>
         public string ComponentPath { get; set; }
+        
+        /// <summary>
+        /// JSON path for component data binding
+        /// </summary>
+        public string JsonPath { get; set; }
         
         /// <summary>
         /// Unique name/identifier for the component instance (used for caching)
@@ -198,6 +208,11 @@ namespace ASTTemplateParser
         public string ComponentPath { get; set; }
         
         /// <summary>
+        /// JSON path for component data binding
+        /// </summary>
+        public string JsonPath { get; set; }
+        
+        /// <summary>
         /// Unique name/identifier for the component instance (used for caching)
         /// </summary>
         public string Name { get; set; }
@@ -239,6 +254,11 @@ namespace ASTTemplateParser
         /// Component path (relative to block/ folder when used as component)
         /// </summary>
         public string ComponentPath { get; set; }
+        
+        /// <summary>
+        /// JSON path for component data binding
+        /// </summary>
+        public string JsonPath { get; set; }
         
         /// <summary>
         /// Unique name/identifier for the component instance (used for caching)
@@ -334,6 +354,11 @@ namespace ASTTemplateParser
         /// Path to the component file (relative to components directory)
         /// </summary>
         public string ComponentPath { get; set; }
+        
+        /// <summary>
+        /// JSON path for component data binding
+        /// </summary>
+        public string JsonPath { get; set; }
         
         /// <summary>
         /// Parameters passed to the component
