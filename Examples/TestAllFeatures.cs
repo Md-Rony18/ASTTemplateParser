@@ -265,6 +265,26 @@ namespace TestAllFeatures
                 return result.Contains("First=100") && result.Contains("Second=200");
             });
 
+            // Test 23: HTML Attribute Ternary Interpolation
+            Test("HTML Attribute Ternary Interpolation", () =>
+            {
+                var engine = new TemplateEngine();
+                engine.SetVariable("IsActive", true);
+                var template = @"<a class=""{{ IsActive ? 'active':'inactive' }}"">Link</a>";
+                var result = engine.Render(template);
+                return result.Contains("class=\"active\"") && !result.Contains("inactive");
+            });
+
+            // Test 24: Mixed HTML Attribute Ternary Interpolation
+            Test("Mixed HTML Attribute Ternary Interpolation", () =>
+            {
+                var engine = new TemplateEngine();
+                engine.SetVariable("IsActive", true);
+                var template = @"<a class=""menu-link {{ IsActive ? 'active':'inactive' }}"">Link</a>";
+                var result = engine.Render(template);
+                return result.Contains("class=\"menu-link active\"") && !result.Contains("inactive");
+            });
+
             // Summary
             Console.WriteLine("\n" + new string('=', 50));
             Console.WriteLine($"RESULTS: {passed} passed, {failed} failed");

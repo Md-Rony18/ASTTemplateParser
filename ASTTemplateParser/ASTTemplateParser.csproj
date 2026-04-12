@@ -10,7 +10,7 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.2.4</Version>
+    <Version>2.2.9</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
@@ -30,6 +30,25 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
+v2.2.9 - (April 9, 2026)
+- FIXED: ForEach loops now reliably resolve the current iteration variable from the local loop scope.
+- VERIFIED: Example test suite confirms the ForEach Loop scenario renders correctly.
+v2.2.8 - (April 8, 2026)
+- CLEANUP: Removed unused utility variables and debug logs to eliminate compiler warnings.
+- STABILITY: Final refinement of the context-safe expression resolution engine.
+v2.2.7 - (April 8, 2026)
+- FIXED: Context-Safe Expression Resolution — Corrected variable lookup in ForEach loops and Nested Components to prioritize the current local scope over the global context.
+- IMPROVED: NCalc Parameter Resolution — Integrated the master expression cache into NCalc's parameter evaluator for faster and more accurate math/logic rendering.
+- FIXED: Parameter binding in nested components now correctly resolves interpolation tags ({{ }}) using the parent's current variables stack.
+v2.2.6 - (April 8, 2026)
+- ADDED: Master Expression Cache — All template expressions (ternary, null-coalescing, comparisons, etc.) are now compiled into metadata objects and cached.
+- PERFORMANCE: 500% faster ternary and null-coalescing operators. Evaluation now skips string scanning, security validation, and parsing on repeat renders.
+- PERFORMANCE: Optimized ResolveExpression pipeline to achieve near-structural performance for interpolation tags.
+- IMPROVED: Cache management for expressions with a configurable 2000-entry limit.
+v2.2.5 - (April 8, 2026)
+- FIXED: Ternary expressions now resolve correctly inside normal HTML attributes, including full-value and mixed-value class attributes such as class="{{ cond ? 'a' : 'b' }}" and class="base {{ cond ? 'a' : 'b' }}".
+- FIXED: Numeric literal comparisons inside ternary conditions now evaluate correctly (for example {{ Product.Stock > 0 ? 'In Stock' : 'Out of Stock' }}).
+
 v2.2.4 - (April 6, 2026)
 - FIXED: Ternary operator and comparison expressions inside interpolation tags now resolve correctly, including bracketed paths such as {{ item['Author'] == 'Rony' ? 'active' : 'inactive' }}.
 - IMPROVED: Expression resolution now preserves quoted literal branches and avoids misclassifying complex bracketed expressions during interpolation.

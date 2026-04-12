@@ -1,0 +1,10 @@
+<a href="{{ Block.Attributes.href }}" class="btn {{ Block.Class }}" data-element="button">
+    <ForEach var="item" in="Block.Items">
+        <If condition="item.Type == 'text'">
+            <span class="{{ item.Class }}" data-field="text" data-type="text" contenteditable="true">{{ item.Value }}</span>
+        </If>
+        <ElseIf condition="item.Type == 'icon'">
+            <i class="{{ item.Value }} {{ item.Class }}" data-field="icon" data-type="icon"></i>
+        </ElseIf>
+    </ForEach>
+</a>

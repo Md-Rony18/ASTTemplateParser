@@ -1,0 +1,40 @@
+{
+  "Page": {
+    "Id": "home_001",
+    "Title": "Welcome to AST CMS",
+    "Blocks": [
+      {
+        "Id": "hero_1",
+        "Type": "hero",
+        "Class": "main-hero pb-5",
+        "Fields": {
+          "background": { "Value": "/assets/img/hero-1.jpg" },
+          "title": { "Value": "Build Faster with Hybrid CMS" },
+          "description": { "Value": "The power of ASTTemplateParser meets the flexibility of JSON." },
+          "align": { "Value": "center" }
+        },
+        "Children": [
+          {
+            "Id": "btn_1",
+            "Type": "button",
+            "Class": "btn-primary",
+            "Attributes": { "href": "/start" },
+            "Items": [
+              { "Type": "text", "Value": "Get Started" },
+              { "Type": "icon", "Value": "fa fa-rocket" }
+            ]
+          }
+        ]
+      },
+      {
+        "Id": "title_1",
+        "Type": "section-title",
+        "Class": "mt-5",
+        "Fields": {
+          "title": { "Value": "Our Features", "Class": "h2-title" },
+          "subtitle": { "Value": "Why choose our engine?", "Class": "text-muted" }
+        }
+      }
+    ]
+  }
+}

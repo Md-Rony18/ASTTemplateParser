@@ -468,11 +468,125 @@ namespace Examples
                 failed++;
             }
 
-            // Test 14: Truthiness Logic (Numbers, Strings, Collections)
+            // Test 14: Attribute Ternary Interpolation in Recursive Fragment
             try
             {
                 TemplateEngine.ClearGlobalVariables();
-                
+
+                var menuData = new List<object>
+                {
+                    new Dictionary<string, object> {
+                        { "Item", new { Name = "Category", Href = "/cat" } },
+                        { "Items", new List<object> {
+                            new Dictionary<string, object> {
+                                { "Item", new { Name = "Product", Href = "/prod" } },
+                                { "Items", new List<object>() }
+                            }
+                        }}
+                    },
+                    new Dictionary<string, object> {
+                        { "Item", new { Name = "Leaf", Href = "/leaf" } },
+                        { "Items", new List<object>() }
+                    }
+                };
+
+                TemplateEngine.SetGlobalVariable("MenuData", menuData);
+
+                var engine = new TemplateEngine();
+                var template = @"
+                    <Define name=""menuItem"">
+                        <li>
+                            <a href=""{{menuNode.Item.Href}}"" class=""{{ menuNode.Items ? 'active':'unactive' }}"">
+                                {{menuNode.Item.Name}}
+                            </a>
+                            <If condition=""menuNode.Items"">
+                                <ul class=""submenu"">
+                                    <ForEach var=""child"" in=""menuNode.Items"">
+                                        <Render name=""menuItem"" menuNode=""child"" />
+                                    </ForEach>
+                                </ul>
+                            </If>
+                        </li>
+                    </Define>
+                    <ul>
+                        <ForEach var=""item"" in=""MenuData"">
+                            <Render name=""menuItem"" menuNode=""item"" />
+                        </ForEach>
+                    </ul>";
+
+                var result = engine.Render(template);
+
+                if (result.Contains("class=\"active\"") && result.Contains("class=\"unactive\"") && result.Contains("Category") && result.Contains("Leaf"))
+                {
+                    Console.WriteLine("✓ Test 14: Attribute Ternary Interpolation in Recursive Fragment");
+                    passed++;
+                }
+                else
+                {
+                    Console.WriteLine($"✗ Test 14: Attribute ternary interpolation failed. Result: {result}");
+                    failed++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"✗ Test 14: Exception - {ex.Message}");
+                failed++;
+            }
+
+            // Test 15: Mixed Attribute Ternary Interpolation in Recursive Fragment
+            try
+            {
+                TemplateEngine.ClearGlobalVariables();
+
+                var menuData = new List<object>
+                {
+                    new Dictionary<string, object> {
+                        { "Item", new { Name = "Category", Href = "/cat" } },
+                        { "Items", new List<object> { new { Name = "x" } } }
+                    },
+                    new Dictionary<string, object> {
+                        { "Item", new { Name = "Leaf", Href = "/leaf" } },
+                        { "Items", new List<object>() }
+                    }
+                };
+
+                TemplateEngine.SetGlobalVariable("MenuData", menuData);
+
+                var engine = new TemplateEngine();
+                var template = @"
+                    <Define name=""menuItem"">
+                        <a href=""{{menuNode.Item.Href}}"" class=""menu-link {{ menuNode.Items ? 'active':'unactive' }}"">{{menuNode.Item.Name}}</a>
+                    </Define>
+                    <ul>
+                        <ForEach var=""item"" in=""MenuData"">
+                            <Render name=""menuItem"" menuNode=""item"" />
+                        </ForEach>
+                    </ul>";
+
+                var result = engine.Render(template);
+
+                if (result.Contains("class=\"menu-link active\"") && result.Contains("class=\"menu-link unactive\""))
+                {
+                    Console.WriteLine("✓ Test 15: Mixed Attribute Ternary Interpolation in Recursive Fragment");
+                    passed++;
+                }
+                else
+                {
+                    Console.WriteLine($"✗ Test 15: Mixed attribute ternary interpolation failed. Result: {result}");
+                    failed++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"✗ Test 15: Exception - {ex.Message}");
+                failed++;
+            }
+
+            // Test 16: Truthiness Logic (Numbers, Strings, Collections)
+            try
+            {
+                TemplateEngine.ClearGlobalVariables();
+
                 var data = new Dictionary<string, object>
                 {
                     { "NumOne", 1 },

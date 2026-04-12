@@ -34,6 +34,31 @@ namespace ASTTemplateParser
         private const int MaxExpressionCacheSize = 1000;
         private const int SmallBuilderThreshold = 4096;
 
+        // Master expression cache to avoid repeated string parsing and scanning
+        private static readonly ConcurrentDictionary<string, CompiledExpression> _masterCache = 
+            new ConcurrentDictionary<string, CompiledExpression>();
+
+        private enum ExpressionCategory { Simple, Nested, Ternary, NullCoalescing, Comparison, Filter, NCalc, Literal, Indexer }
+
+        private class CompiledExpression
+        {
+            public ExpressionCategory Category;
+            public object LiteralValue;
+            public string SimpleName;
+            public string[] PathParts;
+            public TernaryParts Ternary;
+            public NullCoalescingParts NullCoalescing;
+            public ComparisonParts Comparison;
+            public bool IsSafe;
+        }
+
+        private struct TernaryParts { public string Condition; public string WhenTrue; public string WhenFalse; }
+        private struct NullCoalescingParts { public string Left; public string Right; }
+        private struct ComparisonParts { public string Left; public string Right; public string Operator; }
+
+        // Template fragments defined with <Define> for inline recursion
+        private Dictionary<string, DefineNode> _templateFragments = new Dictionary<string, DefineNode>(StringComparer.OrdinalIgnoreCase);
+
         // Component loader delegate - set by TemplateEngine
         private Func<string, RootNode> _componentLoader;
         
@@ -46,8 +71,9 @@ namespace ASTTemplateParser
         // Slot content passed from parent Include
         private Dictionary<string, List<AstNode>> _slotContent = new Dictionary<string, List<AstNode>>();
         
-        // Template fragments defined with <Define> for inline recursion
-        private Dictionary<string, DefineNode> _templateFragments = new Dictionary<string, DefineNode>(StringComparer.OrdinalIgnoreCase);
+        // Master expression cache removed from here and moved up
+
+        // Expression structs moved up
 
         public Evaluator(IVariableContext variables = null, SecurityConfig security = null, int templateSizeHint = 0)
         {
@@ -379,163 +405,188 @@ namespace ASTTemplateParser
 
         private object ResolveExpression(string expression, IVariableContext variables)
         {
-            if (string.IsNullOrEmpty(expression))
-                return null;
+            if (string.IsNullOrEmpty(expression)) return null;
 
-            expression = expression.Trim();
-
-            if (expression.Length >= 2)
+            // 1. Check Master Cache for pre-parsed expression logic
+            if (_masterCache.TryGetValue(expression, out var compiled))
             {
-                char first = expression[0];
-                char last = expression[expression.Length - 1];
-                if ((first == '\'' && last == '\'') || (first == '"' && last == '"'))
-                {
-                    return CleanResult(expression);
-                }
+                if (!compiled.IsSafe) return null;
+                return EvaluateCompiled(compiled, variables);
             }
 
-            // ULTRA-FAST PATH: Simple variable name (no special chars)
-            // Most template expressions are just simple names like {{ Name }}, {{ title }}
-            // This avoids the character scan entirely for these common cases
-            if (expression.Length < 64) // reasonable limit for simple var names
+            // 2. Not in cache: Perform full analysis and compile
+            var newCompiled = CompileExpression(expression);
+            
+            // Store in cache (limit size)
+            if (_masterCache.Count < MaxExpressionCacheSize * 2)
+                _masterCache.TryAdd(expression, newCompiled);
+
+            if (!newCompiled.IsSafe) return null;
+            return EvaluateCompiled(newCompiled, variables);
+        }
+
+        private CompiledExpression CompileExpression(string expression)
+        {
+            string trimmed = expression.Trim();
+            var compiled = new CompiledExpression { IsSafe = true, SimpleName = trimmed };
+
+            // Literal checks
+            if (IsStandaloneQuotedLiteral(trimmed))
             {
-                bool isSimple = true;
-                bool hasDotSimple = false;
-                for (int i = 0; i < expression.Length; i++)
-                {
-                    char c = expression[i];
-                    if (c == '.') { hasDotSimple = true; continue; }
-                    if (c == '[' || c == '(' || c == '|' || c == ' ' || c == '"' || c == '\'')
-                    { isSimple = false; break; }
-                }
-                if (isSimple)
-                {
-                    if (!hasDotSimple)
-                    {
-                        // Pure simple variable: just do a lookup
-                        if (variables.TryGetValue(expression, out object simpleVal))
-                        {
-                            if (!_security.BlockedPropertyNames.Contains(expression))
-                                return CleanResult(simpleVal);
-                        }
-                        // Not found — fall through to NCalc for numeric literals etc.
-                    }
-                    else
-                    {
-                        // Dot path: skip to nested path resolution directly
-                        if (SecurityUtils.IsPropertyPathSafe(expression, _security))
-                            return CleanResult(ResolveNestedPath(expression, variables));
-                        return null;
-                    }
-                }
+                compiled.Category = ExpressionCategory.Literal;
+                compiled.LiteralValue = CleanResult(trimmed);
+                return compiled;
             }
 
-            // Security: Validate expression with full config
-            if (!SecurityUtils.IsExpressionSafe(expression, _security))
+            if (bool.TryParse(trimmed, out bool b)) { compiled.Category = ExpressionCategory.Literal; compiled.LiteralValue = b; return compiled; }
+            if (int.TryParse(trimmed, out int intVal)) { compiled.Category = ExpressionCategory.Literal; compiled.LiteralValue = intVal; return compiled; }
+            if (decimal.TryParse(trimmed, out decimal decVal)) { compiled.Category = ExpressionCategory.Literal; compiled.LiteralValue = decVal; return compiled; }
+            if (double.TryParse(trimmed, out double dblVal)) { compiled.Category = ExpressionCategory.Literal; compiled.LiteralValue = dblVal; return compiled; }
+            
+            // Re-assign SimpleName as trimmed for identifying variable lookups later
+            compiled.SimpleName = trimmed;
+
+            // Security check once
+            if (!SecurityUtils.IsExpressionSafe(trimmed, _security))
             {
-                string reason = !_security.AllowIndexerAccess && expression.Contains("[") ? "Indexer access disabled" : "Safe characters violation or dangerous pattern";
-                throw new TemplateSecurityException(
-                    $"Unsafe expression detected: '{expression}'. Reason: {reason}", "ExpressionInjection", expression);
+                compiled.IsSafe = false;
+                return compiled;
             }
 
-            // PERFORMANCE: Single-pass character scan to set flags
-            // Only reached for complex expressions with brackets, pipes, parens, etc.
+            // Perform character scan once to determine category
             bool hasBracket = false, hasDot = false, hasParen = false, hasPipe = false;
-            for (int i = 0; i < expression.Length; i++)
+            bool hasQuestion = false, hasColon = false, hasEquals = false, hasBang = false;
+            bool hasGt = false, hasLt = false, hasNullCoalescing = false;
+            
+            for (int i = 0; i < trimmed.Length; i++)
             {
-                switch (expression[i])
+                switch (trimmed[i])
                 {
-                    case '[': case ']': hasBracket = true; break;
+                    case '[': hasBracket = true; break;
                     case '.': hasDot = true; break;
                     case '(': hasParen = true; break;
                     case '|': hasPipe = true; break;
+                    case '?':
+                        hasQuestion = true;
+                        if (i + 1 < trimmed.Length && trimmed[i + 1] == '?') hasNullCoalescing = true;
+                        break;
+                    case ':': hasColon = true; break;
+                    case '=': hasEquals = true; break;
+                    case '!': hasBang = true; break;
+                    case '>': hasGt = true; break;
+                    case '<': hasLt = true; break;
                 }
             }
 
-            // Indexer support (e.g., item[key] or item["key"]) - FAST PATH
-            // ONLY if it's a simple indexer access (no logical operators or ternary)
-            if (hasBracket && !expression.Contains("=") && !expression.Contains("?") && 
-                !expression.Contains(">") && !expression.Contains("<") && !expression.Contains("!"))
-            {
-                return CleanResult(ResolveIndexerAccess(expression, variables));
-            }
+            bool hasOperators = hasQuestion || hasColon || hasEquals || hasBang || hasGt || hasLt;
 
-            // Check for direct variable match first (even with dots)
-            // This handles cases like engine.SetVariable("Data.Items", items)
-            if (!hasParen)
-            {
-                if (variables.TryGetValue(expression, out object directValue))
-                {
-                    // Security: Check if variable name is blocked
-                    if (!_security.BlockedPropertyNames.Contains(expression))
-                        return CleanResult(directValue);
-                }
-            }
-
-            // Simple variable lookup (no dots, no parens, no pipes)
-            if (!hasDot && !hasParen && !hasPipe)
-            {
-                // Already checked via TryGetValue above, if we reach here it's not in the dictionary
-                // Fall through to NCalc for potential numeric literals or other simple expressions
-            }
-
-            // Pipe support for filters (e.g., {{ Name | uppercase }} or {{ Price | currency:"en-GB" }})
-            if (hasPipe)
-            {
-                return ResolveFilterExpression(expression, variables);
-            }
+            if (hasPipe) { compiled.Category = ExpressionCategory.Filter; return compiled; }
             
-            // Nested property access (contains dots, no parens, no pipes)
-            if (hasDot && !hasParen)
+            if (hasNullCoalescing)
             {
-                // Security: Validate property path
-                if (!SecurityUtils.IsPropertyPathSafe(expression, _security))
+                int opIdx = FindTopLevelOperator(trimmed, "??");
+                if (opIdx >= 0)
                 {
-                    return null; // Silently block unsafe paths
+                    compiled.Category = ExpressionCategory.NullCoalescing;
+                    compiled.NullCoalescing = new NullCoalescingParts { Left = trimmed.Substring(0, opIdx).Trim(), Right = trimmed.Substring(opIdx + 2).Trim() };
+                    return compiled;
                 }
-                return CleanResult(ResolveNestedPath(expression, variables));
             }
 
-            // Ternary support: evaluate manually because NCalc.NetCore does not handle ?: expressions reliably
-            if (TryEvaluateTernaryExpression(expression, variables, out var ternaryResult))
+            if (hasQuestion && hasColon)
             {
-                return CleanResult(ternaryResult);
+                int qIdx = FindTopLevelOperator(trimmed, '?');
+                int cIdx = qIdx >= 0 ? FindMatchingTernaryColon(trimmed, qIdx) : -1;
+                if (qIdx >= 0 && cIdx >= 0)
+                {
+                    compiled.Category = ExpressionCategory.Ternary;
+                    compiled.Ternary = new TernaryParts { Condition = trimmed.Substring(0, qIdx).Trim(), WhenTrue = trimmed.Substring(qIdx + 1, cIdx - qIdx - 1).Trim(), WhenFalse = trimmed.Substring(cIdx + 1).Trim() };
+                    return compiled;
+                }
             }
 
-            if (TryEvaluateComparisonExpression(expression, variables, out var comparisonResult))
+            if (hasEquals || hasBang || hasGt || hasLt)
             {
-                return comparisonResult;
+                string[] ops = { "==", "!=", ">=", "<=", ">", "<" };
+                foreach (string op in ops)
+                {
+                    int opIdx = FindTopLevelOperator(trimmed, op);
+                    if (opIdx >= 0)
+                    {
+                        compiled.Category = ExpressionCategory.Comparison;
+                        compiled.Comparison = new ComparisonParts { Left = trimmed.Substring(0, opIdx).Trim(), Right = trimmed.Substring(opIdx + op.Length).Trim(), Operator = op };
+                        return compiled;
+                    }
+                }
             }
 
-            // Complex expression - use NCalc (only if method calls allowed)
-            if (!_security.AllowMethodCalls && hasParen)
+            if (hasBracket && !hasOperators) { compiled.Category = ExpressionCategory.Indexer; return compiled; }
+
+            if (hasDot && !hasParen && !hasOperators)
             {
-                return null; // Block NCalc evaluation if method calls disabled and has parens
+                compiled.Category = ExpressionCategory.Nested;
+                compiled.PathParts = trimmed.Split('.');
+                return compiled;
             }
 
-            var result = EvaluateNCalcExpression(expression, variables);
-            return CleanResult(result);
+            if (!hasDot && !hasBracket && !hasParen && !hasOperators)
+            {
+                compiled.Category = ExpressionCategory.Simple;
+                compiled.SimpleName = trimmed;
+                return compiled;
+            }
+
+            compiled.Category = ExpressionCategory.NCalc;
+            return compiled;
         }
 
-        private bool TryEvaluateTernaryExpression(string expression, IVariableContext variables, out object result)
+        private object EvaluateCompiled(CompiledExpression compiled, IVariableContext variables)
         {
-            result = null;
+            switch (compiled.Category)
+            {
+                case ExpressionCategory.Literal: return compiled.LiteralValue;
+                case ExpressionCategory.Simple:
+                    if (variables.TryGetValue(compiled.SimpleName, out var val)) return CleanResult(val);
+                    return null;
+                case ExpressionCategory.Nested:
+                    return CleanResult(ResolveNestedPathInternal(compiled.PathParts, variables));
+                case ExpressionCategory.Ternary:
+                    bool cond = IsTruthy(ResolveExpression(compiled.Ternary.Condition, variables));
+                    return ResolveExpression(cond ? compiled.Ternary.WhenTrue : compiled.Ternary.WhenFalse, variables);
+                case ExpressionCategory.NullCoalescing:
+                    return ResolveExpression(compiled.NullCoalescing.Left, variables) ?? ResolveExpression(compiled.NullCoalescing.Right, variables);
+                case ExpressionCategory.Comparison:
+                    object l = ResolveExpression(compiled.Comparison.Left, variables);
+                    object r = ResolveExpression(compiled.Comparison.Right, variables);
+                    return CompareValues(l, r, compiled.Comparison.Operator);
+                case ExpressionCategory.Filter: return ResolveFilterExpression(compiled.SimpleName ?? "", variables); // Not fully optimized yet
+                case ExpressionCategory.Indexer: return ResolveIndexerAccess(compiled.SimpleName ?? "", variables); // Not fully optimized yet
+                case ExpressionCategory.NCalc: return EvaluateNCalcExpression(compiled.SimpleName ?? "", variables);
+                default: return null;
+            }
+        }
 
-            int questionIndex = FindTopLevelOperator(expression, '?');
-            if (questionIndex < 0)
-                return false;
+        private object ResolveNestedPathInternal(string[] parts, IVariableContext variables)
+        {
+            if (parts.Length == 0) return null;
 
-            int colonIndex = FindMatchingTernaryColon(expression, questionIndex);
-            if (colonIndex < 0)
-                return false;
+            string fullPath = string.Join(".", parts);
+            if (variables.TryGetValue(fullPath, out var directMatch))
+            {
+                if (!_security.BlockedPropertyNames.Contains(fullPath))
+                    return directMatch;
+            }
 
-            string condition = expression.Substring(0, questionIndex).Trim();
-            string whenTrue = expression.Substring(questionIndex + 1, colonIndex - questionIndex - 1).Trim();
-            string whenFalse = expression.Substring(colonIndex + 1).Trim();
-
-            bool conditionResult = IsTruthy(ResolveExpression(condition, variables));
-            result = ResolveExpression(conditionResult ? whenTrue : whenFalse, variables);
-            return true;
+            if (variables.TryGetValue(parts[0], out var resolved) && resolved != null)
+            {
+                for (int i = 1; i < parts.Length && resolved != null; i++)
+                {
+                    if (!SecurityUtils.IsPropertySafe(parts[i], _security)) return null;
+                    resolved = PropertyAccessor.GetValue(resolved, parts[i]);
+                }
+                return resolved;
+            }
+            return null;
         }
 
         private bool TryEvaluateComparisonExpression(string expression, IVariableContext variables, out object result)
@@ -559,6 +610,46 @@ namespace ASTTemplateParser
             }
 
             return false;
+        }
+
+        private bool IsStandaloneQuotedLiteral(string expression)
+        {
+            if (expression.Length < 2)
+                return false;
+
+            char first = expression[0];
+            char last = expression[expression.Length - 1];
+            if (!((first == '\'' && last == '\'') || (first == '"' && last == '"')))
+                return false;
+
+            bool inSingleQuote = false;
+            bool inDoubleQuote = false;
+
+            for (int i = 0; i < expression.Length; i++)
+            {
+                char c = expression[i];
+                char prev = i > 0 ? expression[i - 1] : '\0';
+
+                if (c == '\'' && !inDoubleQuote && prev != '\\')
+                {
+                    inSingleQuote = !inSingleQuote;
+                    continue;
+                }
+
+                if (c == '"' && !inSingleQuote && prev != '\\')
+                {
+                    inDoubleQuote = !inDoubleQuote;
+                    continue;
+                }
+
+                if (inSingleQuote || inDoubleQuote)
+                    continue;
+
+                if (c == '?' || c == ':' || c == '=' || c == '!' || c == '>' || c == '<' || c == '|' || c == '&')
+                    return false;
+            }
+
+            return true;
         }
 
         private int FindTopLevelOperator(string expression, char target)
@@ -1047,15 +1138,15 @@ namespace ASTTemplateParser
 
                 var ncalc = new Expression(cachedLogicalExpr);
                 
-                Console.WriteLine($"NCalc evaluating: {expression}");
 
                 // Handle parameters manually to support dot notation (nested objects and dictionaries)
                 ncalc.EvaluateParameter += (name, args) =>
                 {
                     if (variables == null) return;
                     
-                    var val = ResolvePropertyPath(variables, name);
-                    Console.WriteLine($"NCalc parameter [{name}] resolved to: {val}");
+                    // Priority: try ResolveExpression first (which handles cached paths, literals, etc.)
+                    // This is much more robust than just ResolvePropertyPath
+                    var val = ResolveExpression(name, variables);
                     args.Result = val;
                 };
 

@@ -1,0 +1,18 @@
+<section class="hero-block {{ Block.Class }}" data-element="hero" data-id="{{ Block.Id }}">
+    <div class="hero-bg">
+        <img data-field="background" data-type="image" src="{{ Block.Fields.background.Value }}" alt="Hero Image">
+    </div>
+    <div class="" data-element="demo-container">
+        <h1 data-field="title" data-type="text" contenteditable="true">
+            {{ Block.Fields.title.Value }}
+        </h1>
+        <p data-field="description" data-type="text" contenteditable="true">
+            {{ Block.Fields.description.Value }}
+        </p>
+        <button data-field="button" data-type="button" contenteditable="true">
+            <span data-field="button-icon-left" data-type="icon"><i class=""></i></span>
+            {{ Block.Fields.button.Value }}
+            <span data-field="button-icon-right" data-type="icon"><i class=""></i></span>
+        </button>
+    </div>
+</section>

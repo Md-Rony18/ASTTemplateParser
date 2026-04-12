@@ -1,0 +1,12 @@
+<div class="section-title {{ Block.Class }}" data-element="section-title" data-id="{{ Block.Id }}">
+    <If condition="Block.Fields.title.Visible != false">
+        <h2 data-field="title" data-type="text" contenteditable="true" class="{{ Block.Fields.title.Class }}">
+            {{ Block.Fields.title.Value }}
+        </h2>
+    </If>
+    <If condition="Block.Fields.subtitle.Visible != false">
+        <p data-field="subtitle" data-type="text" contenteditable="true" class="{{ Block.Fields.subtitle.Class }}">
+            {{ Block.Fields.subtitle.Value }}
+        </p>
+    </If>
+</div>
