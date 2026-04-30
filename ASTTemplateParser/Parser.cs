@@ -381,11 +381,11 @@ namespace ASTTemplateParser
             // Parse metadata: "varName|collectionExpr"
             if (!string.IsNullOrEmpty(token.Metadata))
             {
-                var parts = token.Metadata.Split('|');
-                if (parts.Length == 2)
+                int pipeIdx = token.Metadata.IndexOf('|');
+                if (pipeIdx >= 0)
                 {
-                    node.VariableName = parts[0];
-                    node.CollectionExpression = parts[1];
+                    node.VariableName = token.Metadata.Substring(0, pipeIdx).Trim();
+                    node.CollectionExpression = token.Metadata.Substring(pipeIdx + 1).Trim();
                 }
             }
 

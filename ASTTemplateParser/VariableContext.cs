@@ -25,6 +25,11 @@ namespace ASTTemplateParser
         /// Converts to a standard dictionary (used sparingly for NCalc or external APIs)
         /// </summary>
         Dictionary<string, object> ToDictionary();
+        
+        /// <summary>
+        /// Sets a variable in the current local scope.
+        /// </summary>
+        void SetVariable(string key, object value);
     }
 
     /// <summary>
@@ -59,6 +64,11 @@ namespace ASTTemplateParser
             foreach (var kvp in _variables)
                 result[kvp.Key] = kvp.Value;
             return result;
+        }
+
+        public void SetVariable(string key, object value)
+        {
+            _variables[key] = PropertyAccessor.ConvertJTokenToNative(value);
         }
 
         public IEnumerator<KeyValuePair<string, object>> GetEnumerator() => _variables.GetEnumerator();
@@ -108,6 +118,11 @@ namespace ASTTemplateParser
             foreach (var kvp in _local)
                 result[kvp.Key] = kvp.Value;
             return result;
+        }
+
+        public void SetVariable(string key, object value)
+        {
+            _local[key] = PropertyAccessor.ConvertJTokenToNative(value);
         }
 
         public IEnumerator<KeyValuePair<string, object>> GetEnumerator()

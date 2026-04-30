@@ -2,16 +2,16 @@
     <div class="hero-bg">
         <img data-field="background" data-type="image" src="{{ Block.Fields.background.Value }}" alt="Hero Image">
     </div>
-    <div class="" data-element="demo-container">
+    <div class="" data-element="demo-container" data-identity="" data-name="">
         <h1 data-field="title" data-type="text" contenteditable="true">
             {{ Block.Fields.title.Value }}
         </h1>
         <p data-field="description" data-type="text" contenteditable="true">
             {{ Block.Fields.description.Value }}
         </p>
-        <button data-field="button" data-type="button" contenteditable="true">
+        <button data-field="button" data-type="button">
             <span data-field="button-icon-left" data-type="icon"><i class=""></i></span>
-            {{ Block.Fields.button.Value }}
+            <span contenteditable="true">{{ Block.Fields.button.Value }}</span>
             <span data-field="button-icon-right" data-type="icon"><i class=""></i></span>
         </button>
     </div>

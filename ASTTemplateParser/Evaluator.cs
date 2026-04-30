@@ -38,6 +38,9 @@ namespace ASTTemplateParser
         private static readonly ConcurrentDictionary<string, CompiledExpression> _masterCache = 
             new ConcurrentDictionary<string, CompiledExpression>();
 
+        // Pre-compiled regex for parsing HTML attributes in Data and Block tags
+        private static readonly Regex _attributeRegex = new Regex(@"([\w-]+)=[""'](.*?)[""']", RegexOptions.Compiled);
+
         private enum ExpressionCategory { Simple, Nested, Ternary, NullCoalescing, Comparison, Filter, NCalc, Literal, Indexer }
 
         private class CompiledExpression
@@ -103,6 +106,12 @@ namespace ASTTemplateParser
         // Callback for after Include render (for wrapping output)
         private Func<IncludeInfo, string, string> _onAfterIncludeRender;
         private TemplateEngine _engine;
+        private Action<Dictionary<string, string>, IVariableContext> _onDataTagRender;
+        
+        public void SetDataTagCallback(Action<Dictionary<string, string>, IVariableContext> callback)
+        {
+            _onDataTagRender = callback;
+        }
         
         /// <summary>
         /// Sets the callbacks that fire before/after each Include component renders
@@ -252,6 +261,29 @@ namespace ASTTemplateParser
             }
             else
             {
+                // পারফরম্যান্স ঠিক রাখতে Pre-compiled Regex ব্যবহার করা হচ্ছে
+                var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrEmpty(node.Attributes))
+                {
+                    var matches = _attributeRegex.Matches(node.Attributes);
+                    foreach (Match match in matches)
+                    {
+                        var attrValue = match.Groups[2].Value;
+                        // Interpolate the attribute value if it contains {{ }}
+                        if (attrValue.Contains("{{") && attrValue.Contains("}}"))
+                        {
+                            attrValue = ResolveInterpolationsInString(attrValue);
+                        }
+                        attributes[match.Groups[1].Value] = attrValue;
+                    }
+                }
+
+                // Invoke callback to allow CMS to inject variables based on attributes
+                if (_onDataTagRender != null && attributes.Count > 0)
+                {
+                    _onDataTagRender.Invoke(attributes, _variables);
+                }
+
                 foreach (var child in node.Children)
                 {
                     child.Accept(this);
@@ -286,6 +318,29 @@ namespace ASTTemplateParser
             }
             else
             {
+                // Parse attributes
+                var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrEmpty(node.Attributes))
+                {
+                    var matches = _attributeRegex.Matches(node.Attributes);
+                    foreach (Match match in matches)
+                    {
+                        var attrValue = match.Groups[2].Value;
+                        // Interpolate the attribute value if it contains {{ }}
+                        if (attrValue.Contains("{{") && attrValue.Contains("}}"))
+                        {
+                            attrValue = ResolveInterpolationsInString(attrValue);
+                        }
+                        attributes[match.Groups[1].Value] = attrValue;
+                    }
+                }
+
+                // Invoke callback
+                if (_onDataTagRender != null && attributes.Count > 0)
+                {
+                    _onDataTagRender.Invoke(attributes, _variables);
+                }
+
                 foreach (var child in node.Children)
                 {
                     child.Accept(this);
@@ -333,16 +388,29 @@ namespace ASTTemplateParser
 
         public void Visit(ForEachNode node)
         {
-            var collection = ResolveExpression(node.CollectionExpression) as IEnumerable;
-            if (collection == null)
-                return;
+            var rawCollection = ResolveExpression(node.CollectionExpression);
+            IEnumerable collection = null;
 
-            // Try to get total count for loop.last and loop.total (O(1) for ICollection)
-            int totalCount = -1;
+            if (rawCollection is IEnumerable en && !(rawCollection is string))
+            {
+                // Convert to a concrete list to avoid issues with lazy evaluation (LINQ Take, etc.)
+                // This ensures the custom filters like "take" work perfectly
+                collection = en.Cast<object>().ToList();
+            }
+            else if (rawCollection != null)
+            {
+                // If it's a single item, wrap it in a list
+                collection = new List<object> { rawCollection };
+            }
+
+            if (collection == null) return;
+
+            // Try to get total count for loop.last and loop.total
+            int totalCount = 0;
             if (collection is ICollection col) totalCount = col.Count;
+            else totalCount = ((List<object>)collection).Count;
 
-            // PERFORMANCE: Create ONE reusable child context + loop metadata dict
-            // We update values in-place each iteration — zero allocation per iteration
+            // PERFORMANCE: Create ONE reusable child context
             var loopLocalDict = new Dictionary<string, object>(3, StringComparer.OrdinalIgnoreCase);
             var loopMetadata = new Dictionary<string, object>(5, StringComparer.OrdinalIgnoreCase);
             loopLocalDict["loop"] = loopMetadata;
@@ -478,9 +546,10 @@ namespace ASTTemplateParser
                 }
             }
 
-            bool hasOperators = hasQuestion || hasColon || hasEquals || hasBang || hasGt || hasLt;
-
+            // 1. FILTER PRIORITY: Strings containing '|' are always filters
             if (hasPipe) { compiled.Category = ExpressionCategory.Filter; return compiled; }
+
+            bool hasOperators = hasQuestion || hasColon || hasEquals || hasBang || hasGt || hasLt;
             
             if (hasNullCoalescing)
             {
@@ -570,6 +639,7 @@ namespace ASTTemplateParser
         {
             if (parts.Length == 0) return null;
 
+            // 1. Try full path as direct variable key (e.g., "Data.Item.Title")
             string fullPath = string.Join(".", parts);
             if (variables.TryGetValue(fullPath, out var directMatch))
             {
@@ -577,6 +647,7 @@ namespace ASTTemplateParser
                     return directMatch;
             }
 
+            // 2. Try first part as root variable (standard pattern: item.Name, loop.count)
             if (variables.TryGetValue(parts[0], out var resolved) && resolved != null)
             {
                 for (int i = 1; i < parts.Length && resolved != null; i++)
@@ -586,6 +657,25 @@ namespace ASTTemplateParser
                 }
                 return resolved;
             }
+
+            // 3. Try composite prefix variable key (e.g., "Data.Item" → property "Title")
+            // Handles controller pattern: param["Data.Item"] = item; → {{ Data.Item.Title }}
+            for (int prefixLen = parts.Length - 1; prefixLen >= 2; prefixLen--)
+            {
+                string compositeKey = string.Join(".", parts, 0, prefixLen);
+                if (variables.TryGetValue(compositeKey, out var compositeRoot) && compositeRoot != null
+                    && !_security.BlockedPropertyNames.Contains(compositeKey))
+                {
+                    object current = compositeRoot;
+                    for (int i = prefixLen; i < parts.Length && current != null; i++)
+                    {
+                        if (!SecurityUtils.IsPropertySafe(parts[i], _security)) return null;
+                        current = PropertyAccessor.GetValue(current, parts[i]);
+                    }
+                    return current;
+                }
+            }
+
             return null;
         }
 
@@ -906,7 +996,9 @@ namespace ASTTemplateParser
             if (pipes.Length == 0) return null;
 
             // First part is the base value/expression
-            object currentResult = ResolveExpression(pipes[0].Trim(), variables);
+            // Security: We MUST trim to ensure correct variable lookups
+            string baseExpr = pipes[0].Trim();
+            object currentResult = ResolveExpression(baseExpr, variables);
 
             // Subsequent parts are filters
             for (int i = 1; i < pipes.Length; i++)
@@ -1036,8 +1128,8 @@ namespace ASTTemplateParser
             // ═══════════════════════════════════════════════════════════
             if (parts.Length == 3)
             {
-                // Try "parts[0].parts[1]" as variable first
-                // Then try "parts[0]" as variable with ".parts[1].parts[2]" as nested property
+                // Case 1: "parts[0]" is a variable → access parts[1].parts[2] as nested properties
+                // e.g., item.Address.City where "item" is the variable
                 if (variables.TryGetValue(parts[0], out var root1) && root1 != null)
                 {
                     if (!_security.BlockedPropertyNames.Contains(parts[0]))
@@ -1050,6 +1142,17 @@ namespace ASTTemplateParser
                         }
                     }
                 }
+
+                // Case 2: "parts[0].parts[1]" is a composite variable key → access parts[2] as property
+                // e.g., Data.Item.Title where param["Data.Item"] = item was set in controller
+                string compositeKey = parts[0] + "." + parts[1];
+                if (variables.TryGetValue(compositeKey, out var root2) && root2 != null
+                    && !_security.BlockedPropertyNames.Contains(compositeKey)
+                    && SecurityUtils.IsPropertySafe(parts[2], _security))
+                {
+                    return PropertyAccessor.GetValue(root2, parts[2]);
+                }
+
                 return null;
             }
             
@@ -1201,6 +1304,7 @@ namespace ASTTemplateParser
             bool hasSpace = false, hasParen = false, hasBang = false;
             bool hasEquals = false, hasLt = false, hasGt = false;
             bool hasQuote = false, hasDot = false;
+            bool hasAmp = false, hasPipe = false;
             for (int i = 0; i < condition.Length; i++)
             {
                 switch (condition[i])
@@ -1213,6 +1317,8 @@ namespace ASTTemplateParser
                     case '>': hasGt = true; break;
                     case '"': case '\'': hasQuote = true; break;
                     case '.': hasDot = true; break;
+                    case '&': hasAmp = true; break;
+                    case '|': hasPipe = true; break;
                 }
             }
 
@@ -1232,19 +1338,64 @@ namespace ASTTemplateParser
                 return IsTruthy(val);
             }
 
-            // Complex expression: use NCalc with CACHED parse tree
+            // ═══════════════════════════════════════════════════════════════
+            // NATIVE EVALUATION PATH — resolves nested paths (loop.count,
+            // item.Name) correctly and is faster than NCalc for common
+            // condition patterns used in templates.
+            // ═══════════════════════════════════════════════════════════════
+
+            // Handle negation: !variable or !path.prop (no comparison operators)
+            if (condition[0] == '!' && !hasEquals && !hasLt && !hasGt && !hasParen)
+            {
+                string inner = condition.Substring(1).Trim();
+                return !EvaluateCondition(inner);
+            }
+
+            // Handle logical OR (||) — lower precedence, checked first
+            if (hasPipe)
+            {
+                int orIdx = FindTopLevelOperator(condition, "||");
+                if (orIdx > 0)
+                {
+                    string left = condition.Substring(0, orIdx).Trim();
+                    string right = condition.Substring(orIdx + 2).Trim();
+                    return EvaluateCondition(left) || EvaluateCondition(right);
+                }
+            }
+
+            // Handle logical AND (&&) — higher precedence
+            if (hasAmp)
+            {
+                int andIdx = FindTopLevelOperator(condition, "&&");
+                if (andIdx > 0)
+                {
+                    string left = condition.Substring(0, andIdx).Trim();
+                    string right = condition.Substring(andIdx + 2).Trim();
+                    return EvaluateCondition(left) && EvaluateCondition(right);
+                }
+            }
+
+            // Handle comparison operators: ==, !=, >=, <=, >, <
+            // Uses the same proven logic that powers ternary expressions
+            if (hasEquals || hasGt || hasLt)
+            {
+                if (TryEvaluateComparisonExpression(condition, _variables, out var compResult))
+                {
+                    return IsTruthy(compResult);
+                }
+            }
+
+            // NCalc FALLBACK — only reached for exotic math expressions
             string processedCondition = PreprocessCondition(condition);
 
             try
             {
-                // Use cached NCalc expression tree (same cache as EvaluateNCalcExpression)
-                // This avoids re-parsing the condition string on every evaluation
                 var result = EvaluateNCalcExpression(processedCondition, _variables);
                 return IsTruthy(result);
             }
             catch
             {
-                // Fallback: maybe NCalc failed but we can try basic truthiness if it's still a simple-ish path
+                // Last resort: try basic truthiness
                 try {
                     var val = ResolveNestedPath(condition);
                     return IsTruthy(val);

@@ -104,6 +104,28 @@ namespace ASTTemplateParser
 
             // raw filter: bypasses HTML encoding
             RegisterFilter("raw", (val, args) => val == null ? null : new RawString(val.ToString()));
+
+            // take / limit filter for collections
+            FilterDelegate limitFilter = (val, args) => {
+                if (val == null || args.Length == 0) return val;
+                if (!int.TryParse(args[0], out int count)) return val;
+                
+                var enumerable = val as System.Collections.IEnumerable;
+                if (enumerable == null) return val;
+
+                var list = new List<object>();
+                var enumerator = enumerable.GetEnumerator();
+                int i = 0;
+                while (enumerator.MoveNext() && i < count)
+                {
+                    list.Add(enumerator.Current);
+                    i++;
+                }
+                return list;
+            };
+
+            RegisterFilter("take", limitFilter);
+            RegisterFilter("limit", limitFilter);
         }
 
         /// <summary>
@@ -192,6 +214,7 @@ namespace ASTTemplateParser
         /// Parameters: (IncludeInfo info, TemplateEngine engine)
         /// </summary>
         private Action<IncludeInfo, TemplateEngine> _onBeforeIncludeRender;
+        private Action<Dictionary<string, string>, IVariableContext> _onDataTagRender;
         
         /// <summary>
         /// Callback that fires AFTER each Include component renders.
@@ -243,9 +266,21 @@ namespace ASTTemplateParser
         
         /// <summary>
         /// Gets the current OnAfterIncludeRender callback (for internal use by Evaluator)
-        /// </summary>
         public Func<IncludeInfo, string, string> GetAfterIncludeCallback() => _onAfterIncludeRender;
-        
+
+        /// <summary>
+        /// Sets a callback that fires when an inline Data or Block tag is rendered.
+        /// Use this to dynamically extract attributes and inject variables into the context.
+        /// </summary>
+        public TemplateEngine OnDataTagRender(Action<Dictionary<string, string>, IVariableContext> callback)
+        {
+            _onDataTagRender = callback;
+            return this;
+        }
+
+        public Action<Dictionary<string, string>, IVariableContext> GetDataTagCallback() => _onDataTagRender;
+
+
         /// <summary>
         /// Sets the base directory for components
         /// </summary>
@@ -332,7 +367,10 @@ namespace ASTTemplateParser
         }
 
         /// <summary>
-        /// Sets a variable for template rendering
+        /// Sets a variable for template rendering.
+        /// If the value is a Newtonsoft.Json JToken (JObject, JArray, JValue), it is automatically
+        /// converted to native .NET types (Dictionary, List, primitives) for maximum performance.
+        /// This avoids per-access reflection overhead during rendering.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public TemplateEngine SetVariable(string key, object value)
@@ -344,7 +382,10 @@ namespace ASTTemplateParser
                     $"Cannot set blocked variable: {key}", "BlockedVariable");
             }
             
-            _variables[key] = value;
+            // Auto-convert JToken → native .NET types for maximum performance
+            // JObject → Dictionary<string, object>, JArray → List<object>, JValue → primitive
+            // This eliminates per-access reflection overhead during rendering
+            _variables[key] = PropertyAccessor.ConvertJTokenToNative(value);
             _variablesDirty = true; // Mark hash as stale
             return this;
         }
@@ -420,15 +461,18 @@ namespace ASTTemplateParser
                     $"Cannot set blocked global variable: {key}", "BlockedVariable");
             }
 
+            // Auto-convert JToken → native .NET types for maximum performance
+            var nativeValue = PropertyAccessor.ConvertJTokenToNative(value);
+
             if (websiteId > 0)
             {
                 var websiteVars = _websiteGlobals.GetOrAdd(websiteId,
                     _ => new ConcurrentDictionary<string, object>(StringComparer.OrdinalIgnoreCase));
-                websiteVars[key] = value;
+                websiteVars[key] = nativeValue;
             }
             else
             {
-                _globalVariables[key] = value;
+                _globalVariables[key] = nativeValue;
             }
 
             // Increment version to invalidate all data-aware caches
@@ -975,7 +1019,7 @@ namespace ASTTemplateParser
             var evaluator = new Evaluator(evaluatorVars, _security, template.Length);
             
             // Setup component loader if components directory is configured
-            if (!string.IsNullOrEmpty(_componentsDirectory))
+            if (!string.IsNullOrEmpty(_componentsDirectory) || !string.IsNullOrEmpty(_localComponentsDirectory))
             {
                 evaluator.SetComponentLoader(LoadComponent);
             }
@@ -984,6 +1028,10 @@ namespace ASTTemplateParser
             if (_onBeforeIncludeRender != null || _onAfterIncludeRender != null)
             {
                 evaluator.SetIncludeCallback(_onBeforeIncludeRender, this, _onAfterIncludeRender);
+            }
+            if (_onDataTagRender != null)
+            {
+                evaluator.SetDataTagCallback(_onDataTagRender);
             }
             
             var result = evaluator.Evaluate(cacheEntry.Value);
@@ -1484,7 +1532,7 @@ namespace ASTTemplateParser
 
             var evaluator = new Evaluator(evaluatorVars, _security);
             
-            if (!string.IsNullOrEmpty(_componentsDirectory))
+            if (!string.IsNullOrEmpty(_componentsDirectory) || !string.IsNullOrEmpty(_localComponentsDirectory))
             {
                 evaluator.SetComponentLoader(LoadComponent);
             }
@@ -1493,6 +1541,10 @@ namespace ASTTemplateParser
             if (_onBeforeIncludeRender != null || _onAfterIncludeRender != null)
             {
                 evaluator.SetIncludeCallback(_onBeforeIncludeRender, this, _onAfterIncludeRender);
+            }
+            if (_onDataTagRender != null)
+            {
+                evaluator.SetDataTagCallback(_onDataTagRender);
             }
             
             var result = evaluator.Evaluate(prepared.Ast);
@@ -2262,6 +2314,14 @@ namespace ASTTemplateParser
                    (_instance != null && _instance.ContainsKey(key)) ||
                    (_websiteGlobals != null && _websiteGlobals.ContainsKey(key)) ||
                    (_appGlobals != null && _appGlobals.ContainsKey(key));
+        }
+
+        public void SetVariable(string key, object value)
+        {
+            if (_instance != null)
+            {
+                _instance[key] = PropertyAccessor.ConvertJTokenToNative(value);
+            }
         }
 
         public IVariableContext CreateChild(IDictionary<string, object> localVariables = null)

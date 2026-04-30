@@ -10,12 +10,12 @@
     
     <!-- NuGet Package Settings -->
     <PackageId>ASTTemplateParser</PackageId>
-    <Version>2.2.9</Version>
+    <Version>3.0.7</Version>
     <Authors>AST Template Parser Team</Authors>
     <Company>Your Company</Company>
     <Product>AST Template Parser</Product>
-    <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, block parser with mixed content support, layouts, slots, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, .NET 8.0+, .NET 9.0+, and .NET 10.0+.</Description>
-    <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard;caching;block-parser</PackageTags>
+    <Description>High-performance AST-based template parser for .NET with HTML-like syntax, component system, block parser with mixed content support, layouts, slots, native Newtonsoft.Json support, and enterprise-grade security. Cross-platform compatible with .NET Standard 2.0, .NET Framework 4.8, .NET 6.0+, .NET 8.0+, .NET 9.0+, and .NET 10.0+.</Description>
+    <PackageTags>template;parser;html;razor-alternative;components;layouts;security;high-performance;cross-platform;netstandard;caching;block-parser;json;newtonsoft</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Md-Rony18/ASTTemplateParser</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Md-Rony18/ASTTemplateParser</RepositoryUrl>
@@ -30,6 +30,46 @@
     
     <!-- Release notes -->
     <PackageReleaseNotes>
+v3.0.7 - (April 30, 2026)
+- ADDED: Attribute Interpolation support for Data, Block, and Nav tags — you can now use {{ variable }} inside attributes (e.g., identity="{{ identity }}") and they will be resolved before passing to the OnDataTagRender callback.
+- FIXED: Component Loader Initialization — Resolved a bug where components wouldn't load if only SetLocalComponentsDirectory was used without a global directory.
+- IMPROVED: OnDataTagRender callback now receives fully interpolated attributes, enabling easier dynamic data-fetching based on parent context.
+v3.0.6 - (April 30, 2026)
+- ADDED: OnDataTagRender event in TemplateEngine for extracting inline attributes directly from &lt;Data&gt; and &lt;Block&gt; tags.
+v3.0.5 - (April 30, 2026)
+- ADDED: Attribute Parsing for Data and Block Tags — The Evaluator now automatically extracts all attributes (e.g., source="db", items="3") defined on &lt;Data&gt; and &lt;Block&gt; tags into a dictionary, enabling powerful custom server-side data-fetching logic before rendering child nodes.
+- PERFORMANCE: Attribute extraction uses a static compiled regex (RegexOptions.Compiled) to ensure zero performance hit during rendering.
+
+v3.0.4 - (April 20, 2026)
+- FIXED: ForEach Filter Support — Resolved a critical parsing issue where multiple pipes in a &lt;ForEach&gt; tag (e.g., in="Items | take:2") were causing the parser to fail. The parser now correctly identifies the first pipe as a variable separator and treats the remaining part as a filterable expression.
+- IMPROVED: Filter Result Resolution — The engine now automatically converts filtered collections (including LINQ TakeIterator) into concrete lists before looping. This ensures that custom filters using System.Linq work reliably without casting errors or lazy evaluation failures.
+- ADDED: Built-in filters "take" and "limit" for easy collection slicing (e.g., Data.Items | take:5).
+- PERFORMANCE: Optimized expression scanning priority to ensure filters are detected accurately even when they contain colons or other operators.
+
+v3.0.3 - (April 18, 2026)
+- FIXED: Dotted Variable Name Resolution — Variables with dots in their names (e.g., param["Data.Item"] = item) can now be resolved in nested paths such as {{ Data.Item.Title }}. The engine now correctly handles composite prefix lookups when a direct root match fails.
+- IMPROVED: Property-to-Indexer Fallback — When accessing a property that doesn't exist as a native C# property (common in CMS entities with dynamic fields), the PropertyAccessor now automatically falls back to an indexer (this[name]) before returning null.
+- FIXED: Page Template Variable Injection — In the CMS PageExtension, variables passed to ParseTemplate are now correctly injected into the engine for main page HTML segments, not just for component blocks.
+
+v3.0.2 - (April 13, 2026)
+- FIXED: Comparison conditions inside &lt;If&gt; tags (e.g., loop.count == 1, loop.index == 0, Count &gt; 5) were silently failing — always evaluated to false. Root cause: EvaluateCondition was routing all comparison expressions to NCalc which failed silently. Now uses the engine's own native comparison/logical evaluation path before NCalc fallback.
+- ADDED: Native negation support in conditions — !variable and !path.prop now work correctly in &lt;If&gt; tags.
+- ADDED: Native logical operator support — &amp;&amp; and || conditions (e.g., loop.count &gt; 1 &amp;&amp; loop.count &lt; 3) now evaluate natively without NCalc.
+- PERFORMANCE: Conditions with comparison operators are now faster — native evaluation bypasses NCalc parsing overhead entirely.
+
+v3.0.1 - (April 12, 2026)
+- FIXED: JObject-to-Dictionary conversion was producing empty dictionaries. JObject iterates as JProperty (with .Name/.Value), not KeyValuePair (with .Key/.Value). Now correctly handles both patterns.
+
+v3.0.0 - (April 12, 2026) — MAJOR RELEASE: Native JSON Support
+- ADDED: Native Newtonsoft.Json JToken/JObject/JArray support — pass DeserializeObject&lt;dynamic&gt;() results directly to SetVariable() with zero manual conversion.
+- ADDED: Auto JToken-to-Native conversion in SetVariable() and SetGlobalVariable() — JObject → Dictionary&lt;string, object&gt;, JArray → List&lt;object&gt;, JValue → .NET primitives.
+- ADDED: Reflection-based JToken detection — NO hard dependency on Newtonsoft.Json. Works only when Newtonsoft.Json is loaded at runtime.
+- ADDED: PropertyAccessor.ConvertJTokenToNative() public API for manual conversion when needed.
+- ADDED: JToken support in PropertyAccessor.GetValue() and GetIndexerValue() as fallback for unconverted tokens.
+- PERFORMANCE: Zero overhead for non-JToken types — guard clause returns immediately (~0.0000μs per call).
+- PERFORMANCE: Upfront conversion at SetVariable time eliminates per-access reflection overhead during rendering (~10x faster than lazy reflection).
+- VERIFIED: 886K+ ops/sec (simple) and 75K+ ops/sec (complex) — no performance regression.
+
 v2.2.9 - (April 9, 2026)
 - FIXED: ForEach loops now reliably resolve the current iteration variable from the local loop scope.
 - VERIFIED: Example test suite confirms the ForEach Loop scenario renders correctly.
